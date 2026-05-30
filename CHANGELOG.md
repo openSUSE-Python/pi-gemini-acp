@@ -4,7 +4,7 @@ All notable changes to `pi-gemini-acp` are documented here.
 
 This changelog is maintained from git history and follows a Keep-a-Changelog-style format.
 
-## [Unreleased]
+## [0.13.2] - 2026-05-30
 
 ### Fixed
 
