@@ -305,6 +305,7 @@ describe("createGeminiAcpStreamSimple account pool failover (file-backed)", () =
 		// Must have only tried secondary — primary was cooled down.
 		expect(usedSettings).toHaveLength(1);
 		expect(usedSettings[0]?.env?.GEMINI_CLI_HOME).toBe("/secondary");
+		expect(usedSettings[0]?.args).toContain("gemini-2.5-flash");
 	});
 });
 
