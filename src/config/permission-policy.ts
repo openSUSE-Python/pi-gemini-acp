@@ -95,14 +95,30 @@ export function describePermissionPolicy(policy?: GeminiAcpPermissionPolicy): st
 	return `${resolved.mode}: ${allowed.length > 0 ? allowed.join(", ") : "no filesystem or terminal access"}`;
 }
 
+/** Session facts that affect which ACP client capabilities can be honored. */
+export interface ClientCapabilityOptions {
+	/** Pi has an allowlist of files for this session and will serve `fs/read_text_file` for them. */
+	servesFileReads?: boolean;
+}
+
+/**
+ * Maps the configured Gemini ACP permission policy to ACP clientCapabilities.
+ *
+ * `fs.readTextFile` is advertised only when the policy allows reads _and_ the session actually
+ * serves them (a non-empty allowlist, e.g. `gemini_analyze`). Gemini CLI sends every read inside
+ * the session root to the client once the capability is advertised, so advertising it for sessions
+ * without an allowlist (chat, search) would make every project file read fail. Without the
+ * capability Gemini CLI reads files itself.
+ */
 export function permissionPolicyCapabilities(
 	policy?: GeminiAcpPermissionPolicy,
+	options: ClientCapabilityOptions = {},
 ): AcpClientCapabilities {
 	const resolved = resolvePermissionPolicy(policy);
 	return {
 		auth: { terminal: false },
 		fs: {
-			readTextFile: resolved.filesystemRead,
+			readTextFile: resolved.filesystemRead && options.servesFileReads === true,
 			writeTextFile: resolved.filesystemWrite,
 		},
 		terminal: resolved.terminal,

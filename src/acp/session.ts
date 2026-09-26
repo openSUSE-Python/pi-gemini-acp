@@ -123,7 +123,9 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		const result = await this.rpc.request("initialize", {
 			protocolVersion: 1,
 			clientInfo: { name: "pi-gemini-acp", version: "0.1.0" },
-			clientCapabilities: permissionPolicyCapabilities(this.permissionPolicy),
+			clientCapabilities: permissionPolicyCapabilities(this.permissionPolicy, {
+				servesFileReads: this.allowedReadPaths.size > 0,
+			}),
 		});
 		return normalizeInitializeResult(result);
 	}

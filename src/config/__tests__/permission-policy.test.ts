@@ -25,13 +25,22 @@ describe("Gemini ACP permission policy", () => {
 		expect(describePermissionPolicy()).toContain("no filesystem or terminal access");
 	});
 
-	it("resolves explicit capability booleans", () => {
+	it("advertises readTextFile only when the policy allows reads and the session serves them", () => {
+		const policy = { filesystemRead: true, filesystemWrite: true };
+		expect(permissionPolicyCapabilities(policy).fs).toEqual({
+			readTextFile: false,
+			writeTextFile: true,
+		});
+		expect(permissionPolicyCapabilities(policy, { servesFileReads: true }).fs).toEqual({
+			readTextFile: true,
+			writeTextFile: true,
+		});
 		expect(
-			permissionPolicyCapabilities({
-				filesystemRead: true,
-				filesystemWrite: true,
-			}).fs,
-		).toEqual({ readTextFile: true, writeTextFile: true });
+			permissionPolicyCapabilities(
+				{ filesystemRead: false, filesystemWrite: true },
+				{ servesFileReads: true },
+			).fs,
+		).toEqual({ readTextFile: false, writeTextFile: true });
 		expect(permissionPolicyCapabilities({ terminal: true }).terminal).toBe(true);
 		expect(describePermissionPolicy({ filesystemRead: true })).toContain(
 			"file-read: filesystem read",
