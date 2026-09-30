@@ -178,6 +178,9 @@ export async function closeGeminiAcpClientCache(): Promise<void> {
 
 class CachedGeminiAcpClient implements GeminiAcpClient {
 	private active?: Promise<ActiveProcess>;
+	// Retain the subprocess before initialize resolves so shutdown can interrupt it.
+	private startingSession?: Promise<GeminiAcpProcessSession>;
+	private closed = false;
 	private queue: Promise<unknown> = Promise.resolve();
 	private idleTimer?: ReturnType<typeof setTimeout>;
 	private activeOperations = 0;
@@ -244,6 +247,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 	}
 
 	async close(): Promise<void> {
+		this.closed = true;
 		this.clearIdleTimer();
 		this.removeFromCacheOnce();
 		await this.closeActive();
@@ -397,7 +401,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		signal: AbortSignal | undefined,
 		operation: (active: ActiveProcess) => Promise<T>,
 	): Promise<T> {
-		if (signal?.aborted) {
+		if (this.closed || signal?.aborted) {
 			throw abortError();
 		}
 		this.clearIdleTimer();
@@ -424,10 +428,19 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		return this.active;
 	}
 
+	private assertOpen(): void {
+		if (this.closed) throw abortError();
+	}
+
 	private async createActive(): Promise<ActiveProcess> {
-		const session = await this.sessionFactory(this.settings);
+		const starting = this.sessionFactory(this.settings);
+		this.startingSession = starting;
+		const session = await starting;
 		try {
+			this.assertOpen();
 			await session.initialize();
+			// Shutdown can close the client while initialize is awaiting a response.
+			this.assertOpen();
 			return { session, searchSessions: new Map(), promptSessions: new Map() };
 		} catch (error) {
 			await session.close();
@@ -445,6 +458,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 
 	private scheduleIdleCleanup(): void {
 		this.clearIdleTimer();
+		if (this.closed) return;
 		this.idleTimer = setTimeout(() => {
 			void this.close();
 		}, this.idleTtlMs);
@@ -464,11 +478,12 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 	}
 
 	private async closeActive(): Promise<void> {
-		const active = this.active;
+		const starting = this.startingSession;
+		this.startingSession = undefined;
 		this.active = undefined;
-		if (!active) return;
+		if (!starting) return;
 		try {
-			await (await active).session.close();
+			await (await starting).close();
 		} catch {
 			/* Failed starts are already invalidated; callers get the original error. */
 		}
