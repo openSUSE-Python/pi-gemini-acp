@@ -156,7 +156,7 @@ Environment variables take precedence over `settings.json` values. The model use
 ### Runtime behavior
 
 - **Search:** defaults to 4 results. Live ACP searches run in parallel and stop early once a complete JSON result array is streamed (both enabled by default). Use `PI_GEMINI_ACP_SEARCH_PARALLEL=0` to serialize, or `PI_GEMINI_ACP_SEARCH_EARLY_STOP=0` to wait for the full turn.
-- **ACP sessions:** prompts and search reuse warm subprocesses for 15 minutes. Extension activation prewarms one prompt session for the Pi chat provider and one neutral search session (`PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm; prompt prewarm is also skipped automatically in Gemini-spawned subprocesses).
+- **ACP sessions:** subprocesses stay warm for 15 idle minutes. Each prompt consumes a fresh conversation because the chat adapter already sends Pi's history. A prewarmed prompt session is used once, never for successive turns. Search sessions remain reusable. `PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm.
 - **Deadlines:** initialization and session creation each have a 60-second deadline; prompts have a 30-minute total deadline, long enough for agentic edit/test loops. Positive millisecond overrides are shown above. A timeout invalidates the connection. Transport failures and timeouts do not trigger account retries or failover, since an action may already have completed. Check the working tree or remote state before retrying.
 - **Streaming UI:** Gemini-backed calls surface backend-wait/first-token progress and a `~N tokens · ~$X` cost estimate on the completed title row (informational, may not match billing).
 - **Cache & recall:** successful responses are stored in `~/.pi/gemini-acp/cache.db` + `results/`. Pass `bypassCache: true` to force a live call; `gemini_ask` prompt tasks and `gemini_research` only read cache when `useCache: true`. `gemini_search` and `gemini_research` accept `useRecall: true` / `bypassRecall: true` — exact cache hits win first, recall reuse is marked with similarity, age, and `responseId`. `gemini_results` with `action: "recall"` searches the local SQLite FTS5 query cache; vector/semantic recall is currently disabled.
@@ -296,6 +296,8 @@ When Gemini ACP is selected as the active Pi model, every prompt is prefixed wit
 - `appendTools` (default `true`) — lists active Pi tools.
 
 Set any flag to `false` in `~/.pi/gemini-acp/config/settings.json` to suppress that section.
+
+`chat.maxHistoryMessages` limits the number of messages sent, including the current request. The default is unlimited. A value of `0` sends only the latest message. This is a message-count limit, not a token limit; one large tool result can still dominate the prompt.
 
 ## Model adapter for pi-scraper
 
