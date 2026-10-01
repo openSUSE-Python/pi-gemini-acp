@@ -283,15 +283,31 @@ export function permissionOptionId(
 	}
 	const options = asRecord(params)?.options;
 	if (!Array.isArray(options)) return undefined;
-	return options.find((option) => asRecord(option)?.kind === "allow_once")?.optionId as
-		| string
-		| undefined;
+	const option = options.find((candidate) => asRecord(candidate)?.kind === "allow_once");
+	return coerceString(asRecord(option)?.optionId);
 }
 
 function permissionCapabilityForRequest(
 	params: unknown,
 ): "filesystemRead" | "filesystemWrite" | "terminal" | undefined {
-	const text = ((JSON.stringify(params) as string | undefined) ?? "").toLowerCase();
+	const toolCall = asRecord(asRecord(params)?.toolCall);
+	// ACP kind is authoritative. Never classify from command arguments or diff contents.
+	switch (toolCall?.kind) {
+		case "execute":
+			return "terminal";
+		case "edit":
+		case "delete":
+		case "move":
+			return "filesystemWrite";
+		case "read":
+			return "filesystemRead";
+		case undefined:
+			break;
+		default:
+			return undefined;
+	}
+	// Compatibility with older agents that sent only a tool name.
+	const text = (coerceString(toolCall?.name) ?? "").replaceAll("_", " ").toLowerCase();
 	if (/(^|[^a-z])(terminal|shell|command|execute|exec)([^a-z]|$)/u.test(text)) {
 		return "terminal";
 	}
