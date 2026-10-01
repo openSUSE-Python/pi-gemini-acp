@@ -385,22 +385,12 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		onUpdate?: GeminiAcpPromptUpdateHandler,
 	): Promise<string> {
 		return await this.withWarmProcess(signal, async (active) => {
+			// Consume a prewarmed session once. Each request already contains Pi's full history;
+			// reusing a conversation would append that history repeatedly on the Gemini side.
 			const pendingSession = this.ensurePromptSession(active, cwd, signal);
-			let sessionId: string;
-			try {
-				sessionId = await waitForAbort(pendingSession, signal);
-			} catch (error) {
-				// Never hand an abandoned session/new to a later turn.
-				active.promptSessions.delete(cwd);
-				throw error;
-			}
-			try {
-				return await active.session.prompt(sessionId, parts, onUpdate, { signal });
-			} catch (error) {
-				// Session may have expired or become invalid; evict so the next turn creates a fresh one.
-				active.promptSessions.delete(cwd);
-				throw error;
-			}
+			active.promptSessions.delete(cwd);
+			const sessionId = await waitForAbort(pendingSession, signal);
+			return await active.session.prompt(sessionId, parts, onUpdate, { signal });
 		});
 	}
 
