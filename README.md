@@ -124,6 +124,7 @@ export PI_GEMINI_ACP_IDLE_TTL_MS=900000
 export PI_GEMINI_ACP_NO_PREWARM=1 # disables both chat and search prewarm
 export PI_GEMINI_ACP_STARTUP_TIMEOUT_MS=60000 # deadline per initialize/session-new request
 export PI_GEMINI_ACP_PROMPT_TIMEOUT_MS=1800000 # total deadline per ACP prompt
+export PI_GEMINI_ACP_MAX_PROMPT_SESSIONS=25 # restart the warm chat process after this many turns
 export PI_GEMINI_ACP_SEARCH_EARLY_STOP=0 # optional: opt out of streamed JSON early-stop (enabled by default)
 export PI_GEMINI_ACP_SEARCH_PARALLEL=0 # optional: opt out of parallel live searches (enabled by default)
 export PI_GEMINI_ACP_CACHE=0 # optional: disable persistent response cache
@@ -148,7 +149,7 @@ Environment variables take precedence over `settings.json` values. The model use
 ### Runtime behavior
 
 - **Search:** defaults to 4 results. Live ACP searches run in parallel and stop early once a complete JSON result array is streamed (both enabled by default). Use `PI_GEMINI_ACP_SEARCH_PARALLEL=0` to serialize, or `PI_GEMINI_ACP_SEARCH_EARLY_STOP=0` to wait for the full turn.
-- **ACP sessions:** subprocesses stay warm for 15 idle minutes. Each prompt consumes a fresh conversation because the chat adapter already sends Pi's history. A prewarmed prompt session is used once, never for successive turns. Search sessions remain reusable. `PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm.
+- **ACP sessions:** subprocesses stay warm for 15 idle minutes. Each prompt consumes a fresh conversation because the chat adapter already sends Pi's history. A prewarmed prompt session is used once, never for successive turns. ACP cannot end a conversation, so the warm process is restarted once idle after 25 turns (`PI_GEMINI_ACP_MAX_PROMPT_SESSIONS`) to keep old conversations from accumulating in memory. Search sessions remain reusable. `PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm.
 - **Deadlines:** initialization and session creation each have a 60-second deadline; prompts have a 30-minute total deadline, long enough for agentic edit/test loops. Positive millisecond overrides are shown above. A timeout invalidates the connection. Transport failures and timeouts do not trigger account retries or failover, since an action may already have completed. Check the working tree or remote state before retrying.
 - **Streaming UI:** Gemini-backed calls surface backend-wait/first-token progress and a `~N tokens · ~$X` cost estimate on the completed title row (informational, may not match billing).
 - **Cache & recall:** successful responses are stored in `~/.pi/gemini-acp/cache.db` + `results/`. Pass `bypassCache: true` to force a live call; `gemini_ask` prompt tasks and `gemini_research` only read cache when `useCache: true`. `gemini_search` and `gemini_research` accept `useRecall: true` / `bypassRecall: true` — exact cache hits win first, recall reuse is marked with similarity, age, and `responseId`. `gemini_results` with `action: "recall"` searches the local SQLite FTS5 query cache; vector/semantic recall is currently disabled.

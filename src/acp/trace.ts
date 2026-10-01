@@ -66,8 +66,13 @@ export function traceAcp(event: string, fields: TraceFields = {}): void {
 	}
 }
 
-/** Positive millisecond overrides only; invalid values keep the bounded default. */
-export function acpTimeoutMs(name: string, fallback: number): number {
+/** Positive integer overrides only (at most 2^31 - 1); invalid values keep the default. */
+export function acpPositiveIntEnv(name: string, fallback: number): number {
 	const value = Number(process.env[name]);
 	return Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647 ? value : fallback;
+}
+
+/** Positive millisecond overrides only; invalid values keep the bounded default. */
+export function acpTimeoutMs(name: string, fallback: number): number {
+	return acpPositiveIntEnv(name, fallback);
 }

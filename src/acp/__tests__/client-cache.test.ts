@@ -290,6 +290,21 @@ describe("GeminiAcpClientCache", () => {
 		}
 	});
 
+	it("restarts the warm process after the prompt-session limit so conversations do not pile up", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_MAX_PROMPT_SESSIONS", "2");
+		const factory = new FakeSessionFactory();
+		const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+		const client = cache.get(settings("gemini"), "prompt");
+		await client.prompt({ prompt: "one" });
+		expect(factory.sessions[0]?.closeCalls).toBe(0);
+		await client.prompt({ prompt: "two" });
+		expect(factory.sessions[0]?.closeCalls).toBe(1);
+		await client.prompt({ prompt: "three" });
+		expect(factory.sessions).toHaveLength(2);
+		expect(factory.sessions[1]?.promptCalls).toBe(1);
+		await cache.close();
+	});
+
 	it("consumes a prewarmed prompt conversation only once", async () => {
 		const factory = new FakeSessionFactory();
 		const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
