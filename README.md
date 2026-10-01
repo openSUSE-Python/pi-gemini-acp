@@ -128,7 +128,7 @@ The interactive picker includes a Search tool section. Search is enabled by defa
 export PI_GEMINI_ACP_COMMAND=gemini
 export PI_GEMINI_ACP_ARGS="--acp"
 export PI_GEMINI_ACP_IDLE_TTL_MS=900000
-export PI_GEMINI_ACP_NO_PREWARM=1
+export PI_GEMINI_ACP_NO_PREWARM=1 # disables both chat and search prewarm
 export PI_GEMINI_ACP_SEARCH_EARLY_STOP=0 # optional: opt out of streamed JSON early-stop (enabled by default)
 export PI_GEMINI_ACP_SEARCH_PARALLEL=0 # optional: opt out of parallel live searches (enabled by default)
 export PI_GEMINI_ACP_CACHE=0 # optional: disable persistent response cache
@@ -154,7 +154,7 @@ Environment variables take precedence over `settings.json` values. The model use
 ### Runtime behavior
 
 - **Search:** defaults to 4 results. Live ACP searches run in parallel and stop early once a complete JSON result array is streamed (both enabled by default). Use `PI_GEMINI_ACP_SEARCH_PARALLEL=0` to serialize, or `PI_GEMINI_ACP_SEARCH_EARLY_STOP=0` to wait for the full turn.
-- **ACP sessions:** prompts and search reuse warm subprocesses for 15 minutes. Extension activation prewarms one prompt session for the Pi chat provider and one neutral search session (`PI_GEMINI_ACP_NO_PREWARM=1` disables search prewarm; prompt prewarm is skipped automatically in Gemini-spawned subprocesses).
+- **ACP sessions:** prompts and search reuse warm subprocesses for 15 minutes. Extension activation prewarms one prompt session for the Pi chat provider and one neutral search session (`PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm; prompt prewarm is also skipped automatically in Gemini-spawned subprocesses).
 - **Streaming UI:** Gemini-backed calls surface backend-wait/first-token progress and a `~N tokens · ~$X` cost estimate on the completed title row (informational, may not match billing).
 - **Cache & recall:** successful responses are stored in `~/.pi/gemini-acp/cache.db` + `results/`. Pass `bypassCache: true` to force a live call; `gemini_ask` prompt tasks and `gemini_research` only read cache when `useCache: true`. `gemini_search` and `gemini_research` accept `useRecall: true` / `bypassRecall: true` — exact cache hits win first, recall reuse is marked with similarity, age, and `responseId`. `gemini_results` with `action: "recall"` searches the local SQLite FTS5 query cache; vector/semantic recall is currently disabled.
 - **Stored result retrieval:** `gemini_results({ action: "get", responseId })` now defaults to an agent-friendly overview with summary, source notes, quality signals, and continuation actions. Use `view: "source"` plus `sourceId` for bounded source pages or `view: "raw"` with `cursor` for diagnostic JSON chunks.
