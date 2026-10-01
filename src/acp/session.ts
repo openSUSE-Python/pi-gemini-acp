@@ -21,6 +21,13 @@ import {
 	type JsonRpcNotification,
 	type JsonRpcRequest,
 } from "./jsonrpc-stdio.ts";
+import { acpTimeoutMs, traceAcp } from "./trace.ts";
+
+/**
+ * Total deadline for one ACP prompt. A turn can run many Gemini tool calls (edits, builds, tests),
+ * and a timeout discards its answer, so this only guards against a peer that never responds.
+ */
+export const DEFAULT_PROMPT_TIMEOUT_MS = 1_800_000;
 
 /** Controls cancellation behavior for one in-flight ACP prompt turn. */
 export interface GeminiAcpPromptOptions {
@@ -46,8 +53,8 @@ export interface GeminiAcpInitializeResult {
 
 /** Minimal ACP process/session operations used by one-shot and cached clients. */
 export interface GeminiAcpProcessSession {
-	initialize(): Promise<GeminiAcpInitializeResult>;
-	newSession(cwd: string): Promise<string>;
+	initialize(signal?: AbortSignal): Promise<GeminiAcpInitializeResult>;
+	newSession(cwd: string, signal?: AbortSignal): Promise<string>;
 	prompt(
 		sessionId: string,
 		prompt: string | GeminiAcpPromptPart[],
@@ -131,23 +138,31 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		return session;
 	}
 
-	async initialize(): Promise<GeminiAcpInitializeResult> {
-		const result = await this.rpc.request("initialize", {
-			protocolVersion: 1,
-			clientInfo: { name: "pi-gemini-acp", version: "0.1.0" },
-			clientCapabilities: permissionPolicyCapabilities(this.permissionPolicy, {
-				servesFileReads: this.allowedReadPaths.size > 0,
-			}),
-		});
+	async initialize(signal?: AbortSignal): Promise<GeminiAcpInitializeResult> {
+		const result = await this.rpc.request(
+			"initialize",
+			{
+				protocolVersion: 1,
+				clientInfo: { name: "pi-gemini-acp", version: "0.1.0" },
+				clientCapabilities: permissionPolicyCapabilities(this.permissionPolicy, {
+					servesFileReads: this.allowedReadPaths.size > 0,
+				}),
+			},
+			{ signal, timeoutMs: acpTimeoutMs("PI_GEMINI_ACP_STARTUP_TIMEOUT_MS", 60_000) },
+		);
 		return normalizeInitializeResult(result);
 	}
 
-	async newSession(cwd: string): Promise<string> {
+	async newSession(cwd: string, signal?: AbortSignal): Promise<string> {
 		this.sessionCwd = path.resolve(cwd);
-		const result = await this.rpc.request("session/new", {
-			cwd,
-			mcpServers: [],
-		});
+		const result = await this.rpc.request(
+			"session/new",
+			{
+				cwd,
+				mcpServers: [],
+			},
+			{ signal, timeoutMs: acpTimeoutMs("PI_GEMINI_ACP_STARTUP_TIMEOUT_MS", 60_000) },
+		);
 		const sessionId = asRecord(result)?.sessionId;
 		if (typeof sessionId !== "string") {
 			throw new TypeError("Gemini ACP did not return a sessionId");
@@ -163,6 +178,13 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 	): Promise<string> {
 		const state: PromptState = { accumulatedText: "", onUpdate };
 		this.promptStates.set(sessionId, state);
+		traceAcp("prompt.size", {
+			connectionId: this.rpc.connectionId,
+			inputChars:
+				typeof prompt === "string"
+					? prompt.length
+					: prompt.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0),
+		});
 		try {
 			await this.rpc.request(
 				"session/prompt",
@@ -172,6 +194,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				},
 				{
 					signal: options.signal,
+					timeoutMs: acpTimeoutMs("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", DEFAULT_PROMPT_TIMEOUT_MS),
 					onAbort: () => this.rpc.notify("session/cancel", { sessionId }),
 					abortMode: options.returnTextOnAbort ? "resolve" : "reject",
 				},
@@ -190,6 +213,11 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 	private async handleAgentRequest(message: JsonRpcRequest): Promise<unknown> {
 		if (message.method === "session/request_permission") {
 			const optionId = permissionOptionId(message.params, this.permissionPolicy);
+			traceAcp("permission", {
+				connectionId: this.rpc.connectionId,
+				capability: permissionCapabilityForRequest(message.params) ?? "unknown",
+				outcome: optionId ? "selected" : "cancelled",
+			});
 			return {
 				outcome: optionId ? { outcome: "selected", optionId } : { outcome: "cancelled" },
 			};
@@ -250,6 +278,10 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 	private collectUpdate(params: unknown): void {
 		const record = asRecord(params);
 		const update = asRecord(record?.update);
+		traceAcp("session.update", {
+			connectionId: this.rpc.connectionId,
+			update: coerceString(update?.sessionUpdate) ?? "other",
+		});
 		if (update?.sessionUpdate !== "agent_message_chunk") return;
 		const content = asRecord(update.content);
 		if (content?.type !== "text" || typeof content.text !== "string") return;

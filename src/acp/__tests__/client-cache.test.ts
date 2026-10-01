@@ -11,6 +11,7 @@ import {
 	GeminiAcpClientCache,
 } from "../client-cache.ts";
 import type { GeminiAcpCommandSettings } from "../client.ts";
+import { JsonRpcTransportError } from "../jsonrpc-stdio.ts";
 import type { GeminiAcpProcessSession, GeminiAcpPromptOptions } from "../session.ts";
 
 const originalCwd = process.cwd();
@@ -49,6 +50,103 @@ describe("GeminiAcpClientCache", () => {
 		expect(await outcome).toEqual(new Error("closed during initialize"));
 		expect(session.close).toHaveBeenCalled();
 		expect(session.newSession).not.toHaveBeenCalled();
+	});
+
+	it("cancels a queued prompt without waiting for or cancelling the active turn", async () => {
+		const factory = new FakeSessionFactory({ waitForClosePrompt: true });
+		const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+		const client = cache.get(settings("gemini"), "prompt");
+		const active = new AbortController();
+		const first = client.prompt({ prompt: "active" }, active.signal);
+		const firstOutcome = first.catch((error: unknown) => error);
+		await factory.waitForPromptStart();
+		const queued = new AbortController();
+		const second = client.prompt({ prompt: "must not run" }, queued.signal);
+		queued.abort();
+		await expect(second).rejects.toMatchObject({ name: "AbortError" });
+		expect(active.signal.aborted).toBe(false);
+		expect(factory.sessions[0]?.promptCalls).toBe(1);
+		active.abort();
+		await firstOutcome;
+		await client.prompt({ prompt: "next" });
+		expect(factory.sessions[0]?.promptCalls).toBe(2);
+		await cache.close();
+	});
+
+	it("cancels startup and evicts the abandoned process", async () => {
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let rejectInitialize!: (error: Error) => void;
+		const session = {
+			initialize: vi.fn(() => {
+				entered();
+				return new Promise<never>((_resolve, reject) => {
+					rejectInitialize = reject;
+				});
+			}),
+			newSession: vi.fn(),
+			prompt: vi.fn(),
+			close: vi.fn(async () => {
+				rejectInitialize(new Error("closed"));
+			}),
+		};
+		const cache = new GeminiAcpClientCache({ sessionFactory: async () => session });
+		const client = cache.get(settings("gemini"));
+		const controller = new AbortController();
+		const request = client.prompt({ prompt: "cancel" }, controller.signal);
+		await started;
+		controller.abort();
+		await expect(request).rejects.toMatchObject({ name: "AbortError" });
+		expect(cache.get(settings("gemini"))).not.toBe(client);
+		expect(session.newSession).not.toHaveBeenCalled();
+		await cache.close();
+		expect(session.close).toHaveBeenCalled();
+	});
+
+	it("cancels session creation and never submits the cancelled prompt", async () => {
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let finish!: (id: string) => void;
+		const factory = new FakeSessionFactory();
+		const session = await factory.create();
+		const prompt = vi.spyOn(session, "prompt");
+		vi.spyOn(session, "newSession").mockImplementationOnce(() => {
+			entered();
+			return new Promise<string>((resolve) => {
+				finish = resolve;
+			});
+		});
+		const cache = new GeminiAcpClientCache({ sessionFactory: async () => session });
+		const client = cache.get(settings("gemini"));
+		const controller = new AbortController();
+		const request = client.prompt({ prompt: "cancel" }, controller.signal);
+		await started;
+		controller.abort();
+		await expect(request).rejects.toMatchObject({ name: "AbortError" });
+		finish("abandoned-session");
+		await client.prompt({ prompt: "next" });
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt.mock.calls[0]?.[0]).not.toBe("abandoned-session");
+		await cache.close();
+	});
+
+	it("evicts a failed transport instead of retrying a prompt on it", async () => {
+		const factory = new FakeSessionFactory();
+		const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+		const client = cache.get(settings("gemini"));
+		await client.prompt({ prompt: "warm" });
+		vi.spyOn(factory.sessions[0], "prompt").mockRejectedValueOnce(
+			new JsonRpcTransportError("exited"),
+		);
+		await expect(client.prompt({ prompt: "fail" })).rejects.toThrow("exited");
+		await cache.get(settings("gemini")).prompt({ prompt: "recover" });
+		expect(factory.sessions).toHaveLength(2);
+		expect(factory.sessions[0]?.closeCalls).toBe(1);
+		await cache.close();
 	});
 
 	it("reuses one initialized session for sequential searches with the same settings", async () => {
