@@ -1,5 +1,6 @@
 /** @file Warm Gemini ACP client cache for prompt and search workflows. */
 import type { SearchResultItem } from "../types.ts";
+import { waitForAbort } from "./abort.ts";
 import { clientCacheKey } from "./client-cache-key.ts";
 import type {
 	GeminiAcpClient,
@@ -15,6 +16,7 @@ import {
 	requestToParts,
 	searchSessionCwd,
 } from "./client.ts";
+import { JsonRpcTransportError } from "./jsonrpc-stdio.ts";
 import { geminiBackendProgressText, withGeminiBackendProgress } from "./prompt-progress.ts";
 import { createGeminiAcpSearchEarlyStop } from "./search-early-stop.ts";
 import { geminiAcpSearchParallelEnabled } from "./search-parallel.ts";
@@ -24,6 +26,7 @@ import {
 	type GeminiAcpProcessSession,
 	type GeminiAcpProcessSessionFactory,
 } from "./session.ts";
+import { traceAcp } from "./trace.ts";
 
 export const DEFAULT_IDLE_TTL_MS = 900_000;
 const IDLE_TTL_ENV = "PI_GEMINI_ACP_IDLE_TTL_MS";
@@ -225,7 +228,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 			);
 			return normalizeGeminiAcpSearchResults(earlyStop.parsedPayload() ?? parseSearchPayload(text));
 		};
-		return geminiAcpSearchParallelEnabled() ? await run() : await this.enqueue(run);
+		return geminiAcpSearchParallelEnabled() ? await run() : await this.enqueue(run, signal);
 	}
 
 	async prompt(
@@ -243,6 +246,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 					signal,
 					onUpdate,
 				),
+			signal,
 		);
 	}
 
@@ -254,18 +258,22 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 	}
 
 	async warmSearchSession(signal?: AbortSignal): Promise<void> {
-		await this.enqueue(() =>
-			this.withWarmProcess(signal, async (active) => {
-				await this.ensureIdleSearchSession(active, searchSessionCwd());
-			}),
+		await this.enqueue(
+			() =>
+				this.withWarmProcess(signal, async (active) => {
+					await waitForAbort(this.ensureIdleSearchSession(active, searchSessionCwd()), signal);
+				}),
+			signal,
 		);
 	}
 
 	async warmPromptSession(cwd: string, signal?: AbortSignal): Promise<void> {
-		await this.enqueue(() =>
-			this.withWarmProcess(signal, async (active) => {
-				await this.ensurePromptSession(active, cwd);
-			}),
+		await this.enqueue(
+			() =>
+				this.withWarmProcess(signal, async (active) => {
+					await waitForAbort(this.ensurePromptSession(active, cwd, signal), signal);
+				}),
+			signal,
 		);
 	}
 
@@ -297,7 +305,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 				if (!claim.reused) {
 					onProgress?.("search", `${header}\n\n● Creating search session...`);
 				}
-				const sessionId = await claim.entry.sessionId;
+				const sessionId = await waitForAbort(claim.entry.sessionId, signal);
 				onProgress?.("search", geminiBackendProgressText("waiting", header, "search"));
 				const wrappedOnUpdate = withGeminiBackendProgress(
 					onUpdate,
@@ -377,7 +385,15 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		onUpdate?: GeminiAcpPromptUpdateHandler,
 	): Promise<string> {
 		return await this.withWarmProcess(signal, async (active) => {
-			const sessionId = await this.ensurePromptSession(active, cwd);
+			const pendingSession = this.ensurePromptSession(active, cwd, signal);
+			let sessionId: string;
+			try {
+				sessionId = await waitForAbort(pendingSession, signal);
+			} catch (error) {
+				// Never hand an abandoned session/new to a later turn.
+				active.promptSessions.delete(cwd);
+				throw error;
+			}
 			try {
 				return await active.session.prompt(sessionId, parts, onUpdate, { signal });
 			} catch (error) {
@@ -388,13 +404,22 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		});
 	}
 
-	private async ensurePromptSession(active: ActiveProcess, cwd: string): Promise<string> {
+	private async ensurePromptSession(
+		active: ActiveProcess,
+		cwd: string,
+		signal?: AbortSignal,
+	): Promise<string> {
 		let sessionId = active.promptSessions.get(cwd);
 		if (!sessionId) {
-			sessionId = active.session.newSession(cwd);
+			sessionId = active.session.newSession(cwd, signal);
 			active.promptSessions.set(cwd, sessionId);
 		}
-		return await sessionId;
+		try {
+			return await sessionId;
+		} catch (error) {
+			if (active.promptSessions.get(cwd) === sessionId) active.promptSessions.delete(cwd);
+			throw error;
+		}
 	}
 
 	private async withWarmProcess<T>(
@@ -406,10 +431,20 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		}
 		this.clearIdleTimer();
 		this.activeOperations += 1;
+		let initialized = false;
 		try {
-			const active = await this.ensureActive();
+			const active = await waitForAbort(this.ensureActive(), signal);
+			initialized = true;
 			return await operation(active);
 		} catch (error) {
+			if (
+				error instanceof JsonRpcTransportError ||
+				(!initialized && signal?.aborted && this.activeOperations === 1)
+			) {
+				// A dead/timed-out transport cannot serve later turns. An abandoned startup
+				// also needs closing, but not while another caller is waiting for it.
+				void this.close();
+			}
 			if (signal?.aborted) throw abortError();
 			throw error;
 		} finally {
@@ -448,12 +483,23 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		}
 	}
 
-	private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-		const run = this.queue.then(operation, operation);
+	private enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		const started = performance.now();
+		traceAcp("queue.enter");
+		const execute = () => {
+			if (signal?.aborted || this.closed) throw abortError();
+			traceAcp("queue.start", { durationMs: performance.now() - started });
+			return operation();
+		};
+		const run = this.queue.then(execute, execute);
 		this.queue = run.catch(() => {
-			// fire-and-forget
+			// Keep ordering even if a waiting caller has already cancelled.
 		});
-		return run;
+		return waitForAbort(run, signal).catch((error: unknown) => {
+			if (signal?.aborted)
+				traceAcp("queue.abort", { durationMs: performance.now() - started, outcome: "aborted" });
+			throw error;
+		});
 	}
 
 	private scheduleIdleCleanup(): void {
