@@ -134,6 +134,17 @@ function resolveCwd(options: unknown): string {
 	return typeof cwd === "string" ? cwd : process.cwd();
 }
 
+/**
+ * Provider settings for a chat turn on the Pi-selected `modelId`. The prompt prewarm must use the
+ * same function: the cached ACP client is keyed by the resulting command line.
+ */
+export function promptSettingsForModel(
+	settings: GeminiAcpProviderSettings | undefined,
+	modelId: string,
+): GeminiAcpProviderSettings {
+	return { ...settings, model: modelId };
+}
+
 /** Factory that returns a Pi-compatible streamSimple function backed by our ACP client. */
 export function createGeminiAcpStreamSimple(
 	config: GeminiAcpConfig,
@@ -190,10 +201,7 @@ export function createGeminiAcpStreamSimple(
 					});
 				};
 
-				const effectiveSettings: GeminiAcpProviderSettings = {
-					...settings,
-					model: model.id,
-				};
+				const effectiveSettings = promptSettingsForModel(settings, model.id);
 
 				const result = await executeWithAccountPool(
 					config,

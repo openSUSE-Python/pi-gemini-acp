@@ -11,9 +11,9 @@ import { isGeminiAutoModel } from "../config/model-auto.ts";
 import { GEMINI_MODEL_CHOICES } from "../config/model.ts";
 import { configFromEnv, loadConfig, withDefaultGeminiAcpConfig } from "../config/settings.ts";
 import { getGeminiAcpStatus } from "../config/status.ts";
-import type { GeminiAcpConfig } from "../types.ts";
+import type { GeminiAcpConfig, GeminiAcpProviderSettings } from "../types.ts";
 import type { PiToolsSource } from "./preamble.ts";
-import { createGeminiAcpStreamSimple } from "./stream.ts";
+import { createGeminiAcpStreamSimple, promptSettingsForModel } from "./stream.ts";
 import type { GeminiAcpProviderConfig, ModelProviderRegistrar } from "./types.ts";
 
 // Pi's Api type is KnownApi | (string & {}); it accepts any string routing key.
@@ -96,7 +96,7 @@ function modelCost(modelId: string): {
 
 /** Registers the Gemini ACP provider on Pi when preflight passes. */
 export async function registerGeminiAcpModelProvider(
-	pi: Partial<ModelProviderRegistrar> & PiToolsSource,
+	pi: Partial<ModelProviderRegistrar> & Partial<ModelSelectionEvents> & PiToolsSource,
 	rootDir?: string,
 ): Promise<void> {
 	if (typeof pi.registerProvider !== "function") return;
@@ -111,15 +111,48 @@ export async function registerGeminiAcpModelProvider(
 			settings?.command &&
 			!/^(?:1|true|yes)$/iu.test(process.env.PI_GEMINI_ACP_NO_PREWARM ?? "")
 		) {
-			void warmCachedGeminiAcpPromptClient(
-				buildGeminiAcpCommandSettings(
-					settings,
-					primaryAccountEnv(loadedConfig.providers?.accounts),
-				),
-				process.cwd(),
-			).catch(() => {
-				// Best-effort warmup must not fail extension activation.
-			});
+			const warm = (warmSettings: GeminiAcpProviderSettings, cwd: string) => {
+				void warmCachedGeminiAcpPromptClient(
+					buildGeminiAcpCommandSettings(
+						warmSettings,
+						primaryAccountEnv(loadedConfig.providers?.accounts),
+					),
+					cwd,
+				).catch(() => {
+					// Best-effort warmup must not fail extension activation.
+				});
+			};
+			if (typeof pi.on === "function") {
+				// Chat turns run with the model Pi selected (see promptSettingsForModel), which is
+				// only known once a session starts. Warming the configured model instead would
+				// spawn a process that the first turn cannot use, and would spawn one even when
+				// Gemini is not the active chat model.
+				const onModel = (model: PrewarmModel | undefined, cwd: string | undefined) => {
+					if (model?.provider !== "gemini-acp") return;
+					warm(promptSettingsForModel(settings, model.id), cwd ?? process.cwd());
+				};
+				pi.on("session_start", (_event, ctx) => onModel(ctx.model, ctx.cwd));
+				pi.on("model_select", (event, ctx) => onModel(event.model, ctx.cwd));
+			} else {
+				warm(settings, process.cwd());
+			}
 		}
 	}
+}
+
+interface PrewarmModel {
+	id: string;
+	provider: string;
+}
+
+/** The subset of Pi's event API used to prewarm for the selected model. */
+export interface ModelSelectionEvents {
+	on(
+		event: "session_start",
+		handler: (event: unknown, ctx: { model?: PrewarmModel; cwd?: string }) => void,
+	): void;
+	on(
+		event: "model_select",
+		handler: (event: { model?: PrewarmModel }, ctx: { cwd?: string }) => void,
+	): void;
 }
