@@ -205,27 +205,7 @@ describe("createGeminiAcpStreamSimple", () => {
 			search: vi.fn(),
 		} as unknown as GeminiAcpClient;
 
-		const messages = Array.from({ length: 6 }, (_, i) =>
-			i % 2 === 0
-				? ({ role: "user", content: `Q${i}`, timestamp: i } as unknown as Context["messages"][0])
-				: ({
-						role: "assistant",
-						content: [{ type: "text", text: `A${i}` }],
-						timestamp: i,
-						api: "gemini-acp",
-						provider: "gemini-acp",
-						model: "gemini-1.5-flash",
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-					} as unknown as Context["messages"][0]),
-		);
+		const messages = makeTestHistoryMessages(6);
 
 		const context = fakeContext({ messages: messages as unknown as Context["messages"] });
 		const stream = makeStream(client, { maxHistoryMessages: 2 })(fakeModel(), context);
@@ -325,3 +305,27 @@ describe("createGeminiAcpStreamSimple account pool failover (file-backed)", () =
 		expect(usedSettings[0]?.env?.GEMINI_CLI_HOME).toBe("/secondary");
 	});
 });
+
+function makeTestHistoryMessages(count: number): Context["messages"] {
+	return Array.from({ length: count }, (_, i) =>
+		i % 2 === 0
+			? ({ role: "user", content: `Q${i}`, timestamp: i } as unknown as Context["messages"][0])
+			: ({
+					role: "assistant",
+					content: [{ type: "text", text: `A${i}` }],
+					timestamp: i,
+					api: "gemini-acp",
+					provider: "gemini-acp",
+					model: "gemini-1.5-flash",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+				} as unknown as Context["messages"][0]),
+	);
+}
