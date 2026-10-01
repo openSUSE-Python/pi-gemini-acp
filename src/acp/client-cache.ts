@@ -26,10 +26,16 @@ import {
 	type GeminiAcpProcessSession,
 	type GeminiAcpProcessSessionFactory,
 } from "./session.ts";
-import { traceAcp } from "./trace.ts";
+import { acpPositiveIntEnv, traceAcp } from "./trace.ts";
 
 export const DEFAULT_IDLE_TTL_MS = 900_000;
 const IDLE_TTL_ENV = "PI_GEMINI_ACP_IDLE_TTL_MS";
+/**
+ * ACP has no stable way to end a conversation, and every chat turn uses a fresh one, so a warm
+ * Gemini process keeps all earlier turns' sessions in memory. Restart it after this many.
+ */
+export const DEFAULT_MAX_PROMPT_SESSIONS = 25;
+const MAX_PROMPT_SESSIONS_ENV = "PI_GEMINI_ACP_MAX_PROMPT_SESSIONS";
 
 type CacheRemovalListener = (key: string) => void;
 
@@ -41,6 +47,8 @@ interface ActiveProcess {
 	session: GeminiAcpProcessSession;
 	searchSessions: Map<string, SearchSessionEntry[]>;
 	promptSessions: Map<string, Promise<string>>;
+	/** Prompt conversations consumed in this process; they are never closed on the Gemini side. */
+	promptSessionsUsed: number;
 }
 
 interface SearchSessionEntry {
@@ -184,6 +192,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 	// Retain the subprocess before initialize resolves so shutdown can interrupt it.
 	private startingSession?: Promise<GeminiAcpProcessSession>;
 	private closed = false;
+	private retireActiveWhenIdle = false;
 	private queue: Promise<unknown> = Promise.resolve();
 	private idleTimer?: ReturnType<typeof setTimeout>;
 	private activeOperations = 0;
@@ -389,6 +398,14 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 			// reusing a conversation would append that history repeatedly on the Gemini side.
 			const pendingSession = this.ensurePromptSession(active, cwd, signal);
 			active.promptSessions.delete(cwd);
+			active.promptSessionsUsed += 1;
+			if (
+				active.promptSessionsUsed >=
+				acpPositiveIntEnv(MAX_PROMPT_SESSIONS_ENV, DEFAULT_MAX_PROMPT_SESSIONS)
+			) {
+				// Restart the process once idle so abandoned conversations do not accumulate.
+				this.retireActiveWhenIdle = true;
+			}
 			const sessionId = await waitForAbort(pendingSession, signal);
 			return await active.session.prompt(sessionId, parts, onUpdate, { signal });
 		});
@@ -440,6 +457,11 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		} finally {
 			this.activeOperations = Math.max(0, this.activeOperations - 1);
 			if (this.activeOperations === 0) {
+				if (this.retireActiveWhenIdle) {
+					this.retireActiveWhenIdle = false;
+					traceAcp("process.retire");
+					void this.closeActive();
+				}
 				this.scheduleIdleCleanup();
 			}
 		}
@@ -466,7 +488,12 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 			await session.initialize();
 			// Shutdown can close the client while initialize is awaiting a response.
 			this.assertOpen();
-			return { session, searchSessions: new Map(), promptSessions: new Map() };
+			return {
+				session,
+				searchSessions: new Map(),
+				promptSessions: new Map(),
+				promptSessionsUsed: 0,
+			};
 		} catch (error) {
 			await session.close();
 			throw error;
