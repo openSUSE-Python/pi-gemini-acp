@@ -29,19 +29,19 @@ describe("Gemini ACP permission policy", () => {
 		const policy = { filesystemRead: true, filesystemWrite: true };
 		expect(permissionPolicyCapabilities(policy).fs).toEqual({
 			readTextFile: false,
-			writeTextFile: true,
+			writeTextFile: false,
 		});
 		expect(permissionPolicyCapabilities(policy, { servesFileReads: true }).fs).toEqual({
 			readTextFile: true,
-			writeTextFile: true,
+			writeTextFile: false,
 		});
 		expect(
 			permissionPolicyCapabilities(
 				{ filesystemRead: false, filesystemWrite: true },
 				{ servesFileReads: true },
 			).fs,
-		).toEqual({ readTextFile: false, writeTextFile: true });
-		expect(permissionPolicyCapabilities({ terminal: true }).terminal).toBe(true);
+		).toEqual({ readTextFile: false, writeTextFile: false });
+		expect(permissionPolicyCapabilities({ terminal: true }).terminal).toBe(false);
 		expect(describePermissionPolicy({ filesystemRead: true })).toContain(
 			"file-read: filesystem read",
 		);

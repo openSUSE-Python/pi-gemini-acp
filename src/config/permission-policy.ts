@@ -102,7 +102,9 @@ export interface ClientCapabilityOptions {
 }
 
 /**
- * Maps the configured Gemini ACP permission policy to ACP clientCapabilities.
+ * Advertises implemented ACP client services, not permission to use Gemini's own tools. Writes and
+ * terminal execution currently run inside Gemini CLI. Its approval policy determines whether it
+ * asks this client for permission; these flags are not a sandbox.
  *
  * `fs.readTextFile` is advertised only when the policy allows reads _and_ the session actually
  * serves them (a non-empty allowlist, e.g. `gemini_analyze`). Gemini CLI sends every read inside
@@ -119,9 +121,9 @@ export function permissionPolicyCapabilities(
 		auth: { terminal: false },
 		fs: {
 			readTextFile: resolved.filesystemRead && options.servesFileReads === true,
-			writeTextFile: resolved.filesystemWrite,
+			writeTextFile: false,
 		},
-		terminal: resolved.terminal,
+		terminal: false,
 	};
 }
 
