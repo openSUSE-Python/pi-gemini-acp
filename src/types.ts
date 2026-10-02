@@ -118,6 +118,8 @@ export interface GeminiAcpPermissionPolicy {
 	filesystemRead?: boolean;
 	filesystemWrite?: boolean;
 	terminal?: boolean;
+	/** Gemini's `web_fetch` tool (ACP kind `fetch`): retrieving URLs the model chooses. */
+	webFetch?: boolean;
 	reason?: string;
 	updatedAt?: string;
 }

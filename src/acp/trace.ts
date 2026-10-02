@@ -11,7 +11,7 @@ export interface TraceFields {
 	inputChars?: number;
 	code?: number;
 	outcome?: "ok" | "error" | "aborted" | "timeout" | "selected" | "cancelled";
-	capability?: "filesystemRead" | "filesystemWrite" | "terminal" | "unknown";
+	capability?: "filesystemRead" | "filesystemWrite" | "terminal" | "webFetch" | "unknown";
 	update?: string;
 	/** ACP tool kind of a permission request. */
 	kind?: string;

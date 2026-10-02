@@ -16,13 +16,27 @@ describe("Gemini ACP permission policy", () => {
 			filesystemRead: false,
 			filesystemWrite: false,
 			terminal: false,
+			webFetch: false,
 		});
 		expect(permissionPolicyCapabilities()).toEqual({
 			auth: { terminal: false },
 			fs: { readTextFile: false, writeTextFile: false },
 			terminal: false,
 		});
-		expect(describePermissionPolicy()).toContain("no filesystem or terminal access");
+		expect(describePermissionPolicy()).toContain("no filesystem, terminal or web fetch access");
+	});
+
+	it("resolves webFetch as its own capability", () => {
+		expect(resolvePermissionPolicy({ webFetch: true })).toMatchObject({
+			mode: "custom",
+			webFetch: true,
+			filesystemRead: false,
+		});
+		expect(requirePermissionCapability({ terminal: true }, "webFetch")?.message).toContain(
+			"web fetches",
+		);
+		expect(requirePermissionCapability({ webFetch: true }, "webFetch")).toBeUndefined();
+		expect(describePermissionPolicy({ webFetch: true })).toContain("web fetch");
 	});
 
 	it("advertises readTextFile only when the policy allows reads and the session serves them", () => {

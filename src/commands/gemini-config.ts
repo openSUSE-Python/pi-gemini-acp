@@ -93,7 +93,12 @@ export const geminiConfigSchema = Type.Object({
 	),
 	capability: Type.Optional(
 		Type.Union(
-			[Type.Literal("filesystemRead"), Type.Literal("filesystemWrite"), Type.Literal("terminal")],
+			[
+				Type.Literal("filesystemRead"),
+				Type.Literal("filesystemWrite"),
+				Type.Literal("terminal"),
+				Type.Literal("webFetch"),
+			],
 			{
 				description: "Capability to toggle for action=permissions. Omit to show current settings.",
 			},
@@ -107,7 +112,7 @@ export const geminiConfigSchema = Type.Object({
 	),
 	confirmRisk: Type.Optional(
 		Type.Boolean({
-			description: "Must be true when enabling filesystemWrite or terminal permissions.",
+			description: "Must be true when enabling filesystemWrite, terminal or webFetch permissions.",
 		}),
 	),
 	reason: Type.Optional(
@@ -335,7 +340,7 @@ function parsePermissionsArgs(parts: string[]): Params {
 	const [rawCapability, ...rest] = parts;
 	if (!isPermissionCapability(rawCapability)) {
 		throw new Error(
-			"Expected permission capability 'filesystemRead', 'filesystemWrite', or 'terminal'.",
+			"Expected permission capability 'filesystemRead', 'filesystemWrite', 'terminal', or 'webFetch'.",
 		);
 	}
 	let enabled: boolean | undefined;
@@ -369,7 +374,12 @@ function parsePermissionsArgs(parts: string[]): Params {
 function isPermissionCapability(
 	value: string | undefined,
 ): value is NonNullable<Params["capability"]> {
-	return value === "filesystemRead" || value === "filesystemWrite" || value === "terminal";
+	return (
+		value === "filesystemRead" ||
+		value === "filesystemWrite" ||
+		value === "terminal" ||
+		value === "webFetch"
+	);
 }
 
 function parseBooleanToken(value: string): boolean | undefined {

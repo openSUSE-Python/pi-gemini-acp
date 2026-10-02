@@ -12,6 +12,7 @@ const CAPABILITY_LABELS = {
 	filesystemRead: "file reads",
 	filesystemWrite: "file writes",
 	terminal: "terminal commands",
+	webFetch: "fetching web pages",
 } as const;
 
 /** Returns a handler that renders one turn's activity into `message`. */
