@@ -94,6 +94,96 @@ describe("createGeminiAcpStreamSimple", () => {
 		expect(deltas[1].partial.content[0].text).toBe("Hello world!");
 	});
 
+	it("shows Gemini's thoughts, tool calls and policy denials as thinking", async () => {
+		const client = {
+			prompt: vi.fn(async (_req, _signal, onUpdate, observers) => {
+				observers?.onActivity?.({ type: "thought", text: "Checking the tree." });
+				observers?.onActivity?.({
+					type: "tool",
+					toolCallId: "1",
+					kind: "execute",
+					status: "in_progress",
+					title: "git status --short",
+				});
+				observers?.onActivity?.({ type: "tool", toolCallId: "1", status: "completed" });
+				observers?.onActivity?.({
+					type: "permission",
+					kind: "edit",
+					title: "a.txt",
+					capability: "filesystemWrite",
+					outcome: "cancelled",
+				});
+				onUpdate?.({ type: "chunk", text: "Clean.", accumulatedText: "Clean." });
+				return "Clean.";
+			}),
+			search: vi.fn(),
+		} as unknown as GeminiAcpClient;
+
+		const stream = makeStream(client)(fakeModel(), fakeContext());
+		const types: string[] = [];
+		for await (const ev of stream) types.push(ev.type);
+		const message = await stream.result();
+
+		expect(types).toEqual([
+			"start",
+			"thinking_start",
+			"thinking_delta",
+			"thinking_delta",
+			"thinking_delta",
+			"thinking_end",
+			"text_start",
+			"text_delta",
+			"text_end",
+			"done",
+		]);
+		expect(message.content).toEqual([
+			{
+				type: "thinking",
+				thinking:
+					"Checking the tree.\n▸ Shell: git status --short\n✗ Denied by the Gemini ACP permission policy, which does not allow file writes (a.txt). Use /gemini-config permissions to change it.\n",
+			},
+			{ type: "text", text: "Clean." },
+		]);
+	});
+
+	it("uses the token counts and stop reason Gemini reports", async () => {
+		const client = {
+			prompt: vi.fn(async (_req, _signal, _onUpdate, observers) => {
+				observers?.onOutcome?.({
+					stopReason: "max_tokens",
+					usage: {
+						inputTokens: 1000,
+						outputTokens: 10,
+						models: [{ model: "gemini-2.5-pro", inputTokens: 1000, outputTokens: 10 }],
+					},
+				});
+				return "partial answer";
+			}),
+			search: vi.fn(),
+		} as unknown as GeminiAcpClient;
+
+		const message = await makeStream(client)(fakeModel("gemini-auto"), fakeContext()).result();
+		expect(message.stopReason).toBe("length");
+		expect(message.usage.input).toBe(1000);
+		expect(message.usage.output).toBe(10);
+		// Priced as the Pro model that served the turn, not as the gemini-auto default.
+		expect(message.usage.cost.total).toBeCloseTo((1000 * 1.25 + 10 * 10) / 1_000_000);
+	});
+
+	it("reports a refused turn as an error", async () => {
+		const client = {
+			prompt: vi.fn(async (_req, _signal, _onUpdate, observers) => {
+				observers?.onOutcome?.({ stopReason: "refusal" });
+				return "";
+			}),
+			search: vi.fn(),
+		} as unknown as GeminiAcpClient;
+
+		const message = await makeStream(client)(fakeModel(), fakeContext()).result();
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toMatch(/refused/u);
+	});
+
 	it("passes the request through onPayload and sends a replacement", async () => {
 		const prompt = vi.fn(async () => "ok");
 		const client = { prompt, search: vi.fn() } as unknown as GeminiAcpClient;

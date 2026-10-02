@@ -16,15 +16,18 @@ import { getCachedGeminiAcpClient } from "../acp/client-cache.ts";
 import type {
 	GeminiAcpClient,
 	GeminiAcpCommandSettings,
+	GeminiAcpPromptOutcome,
 	GeminiAcpPromptPart,
 	GeminiAcpPromptUpdateHandler,
+	GeminiAcpPromptUsage,
 } from "../acp/client.ts";
-import { estimateCostChars } from "../tools/cost-estimate.ts";
+import { estimateCostChars, estimateCostTokens } from "../tools/cost-estimate.ts";
 import type {
 	GeminiAcpChatSettings,
 	GeminiAcpConfig,
 	GeminiAcpProviderSettings,
 } from "../types.ts";
+import { createActivityRenderer } from "./activity.ts";
 import { AssistantMessageBuilder } from "./message-builder.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
 import {
@@ -131,6 +134,43 @@ function estimateUsage(
 	};
 }
 
+/** Usage from the token counts Gemini CLI reports, priced per model that served the turn. */
+function reportedUsage(usage: GeminiAcpPromptUsage, modelId: string): AssistantMessage["usage"] {
+	const perModel =
+		usage.models.length > 0
+			? usage.models
+			: [{ model: modelId, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }];
+	const costs = perModel.map((entry) =>
+		estimateCostTokens(entry.inputTokens, entry.outputTokens, { model: entry.model }),
+	);
+	const input = costs.reduce((sum, cost) => sum + cost.inputCostUsd, 0);
+	const output = costs.reduce((sum, cost) => sum + cost.outputCostUsd, 0);
+	return {
+		input: usage.inputTokens,
+		output: usage.outputTokens,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: usage.inputTokens + usage.outputTokens,
+		cost: { input, output, cacheRead: 0, cacheWrite: 0, total: input + output },
+	};
+}
+
+/** Maps the ACP stop reason to Pi's. An error message is returned for turns that did not finish. */
+function piStopReason(stopReason: string | undefined): {
+	reason: "stop" | "length";
+	errorMessage?: string;
+} {
+	if (stopReason === "max_tokens" || stopReason === "max_turn_requests")
+		return { reason: "length" };
+	if (stopReason === "refusal") {
+		return { reason: "stop", errorMessage: "Gemini refused to continue this request." };
+	}
+	if (stopReason === "cancelled") {
+		return { reason: "stop", errorMessage: "Gemini ACP cancelled the turn." };
+	}
+	return { reason: "stop" };
+}
+
 /** Extracts cwd from Pi's runtime options. Falls back to process.cwd() when absent. */
 function resolveCwd(options: unknown): string {
 	if (typeof options !== "object" || options === null) return process.cwd();
@@ -197,6 +237,13 @@ export function createGeminiAcpStreamSimple(
 				const onUpdate: GeminiAcpPromptUpdateHandler = (chunk) => {
 					message.appendText(chunk.text);
 				};
+				let outcome: GeminiAcpPromptOutcome = {};
+				const observers = {
+					onActivity: createActivityRenderer(message),
+					onOutcome: (reported: GeminiAcpPromptOutcome) => {
+						outcome = reported;
+					},
+				};
 
 				const effectiveSettings = promptSettingsForModel(settings, model.id);
 
@@ -207,7 +254,7 @@ export function createGeminiAcpStreamSimple(
 						const client: GeminiAcpClient = clientFactory
 							? clientFactory(commandSettings)
 							: getCachedGeminiAcpClient(commandSettings, "prompt");
-						return await client.prompt(request, options?.signal, onUpdate);
+						return await client.prompt(request, options?.signal, onUpdate, observers);
 					},
 					options?.signal,
 					rootDir,
@@ -215,18 +262,19 @@ export function createGeminiAcpStreamSimple(
 				// Clients that return the answer without streaming it still produce a text block.
 				if (!message.text() && result) message.appendText(result);
 
+				const stop = piStopReason(outcome.stopReason);
+				if (stop.errorMessage) throw new Error(stop.errorMessage);
 				const final: AssistantMessage = {
 					...partial,
 					content: message.finish(),
-					usage: estimateUsage(inputChars, result.length, model.id),
-					// ACP prompt result is a plain string; the underlying stop reason (max_tokens,
-					// safety, etc.) is not surfaced by the current JSON-RPC protocol. If Gemini adds
-					// finishReason to the prompt response, map it here instead of hardcoding "stop".
-					stopReason: "stop",
+					usage: outcome.usage
+						? reportedUsage(outcome.usage, model.id)
+						: estimateUsage(inputChars, result.length, model.id),
+					stopReason: stop.reason,
 					timestamp: Date.now(),
 				};
 
-				stream.push({ type: "done", reason: "stop", message: final });
+				stream.push({ type: "done", reason: stop.reason, message: final });
 				stream.end();
 			} catch (cause) {
 				const errorMessage = cause instanceof Error ? cause.message : String(cause);

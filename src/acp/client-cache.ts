@@ -5,6 +5,7 @@ import { clientCacheKey } from "./client-cache-key.ts";
 import type {
 	GeminiAcpClient,
 	GeminiAcpCommandSettings,
+	GeminiAcpPromptObservers,
 	GeminiAcpPromptPart,
 	GeminiAcpPromptRequest,
 	GeminiAcpPromptUpdateHandler,
@@ -244,6 +245,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		request: GeminiAcpPromptRequest,
 		signal?: AbortSignal,
 		onUpdate?: GeminiAcpPromptUpdateHandler,
+		observers?: GeminiAcpPromptObservers,
 	): Promise<string> {
 		return await this.enqueue(
 			async () =>
@@ -254,6 +256,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 					requestToParts(request),
 					signal,
 					onUpdate,
+					observers,
 				),
 			signal,
 		);
@@ -392,6 +395,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		parts: GeminiAcpPromptPart[],
 		signal?: AbortSignal,
 		onUpdate?: GeminiAcpPromptUpdateHandler,
+		observers?: GeminiAcpPromptObservers,
 	): Promise<string> {
 		return await this.withWarmProcess(signal, async (active) => {
 			// Consume a prewarmed session once. Each request already contains Pi's full history;
@@ -407,7 +411,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 				this.retireActiveWhenIdle = true;
 			}
 			const sessionId = await waitForAbort(pendingSession, signal);
-			return await active.session.prompt(sessionId, parts, onUpdate, { signal });
+			return await active.session.prompt(sessionId, parts, onUpdate, { ...observers, signal });
 		});
 	}
 

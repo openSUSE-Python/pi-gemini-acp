@@ -12,8 +12,12 @@ import type { GeminiAcpPermissionPolicy } from "../types.ts";
 import { coerceString } from "../utils/coerce.ts";
 import type {
 	GeminiAcpCommandSettings,
+	GeminiAcpPromptActivity,
+	GeminiAcpPromptObservers,
+	GeminiAcpPromptOutcome,
 	GeminiAcpPromptPart,
 	GeminiAcpPromptUpdateHandler,
+	GeminiAcpPromptUsage,
 } from "./client.ts";
 import {
 	JsonRpcResponseError,
@@ -21,6 +25,7 @@ import {
 	type JsonRpcNotification,
 	type JsonRpcRequest,
 } from "./jsonrpc-stdio.ts";
+import { acpToolKind } from "./tool-kind.ts";
 import { acpTimeoutMs, traceAcp } from "./trace.ts";
 
 /**
@@ -29,8 +34,8 @@ import { acpTimeoutMs, traceAcp } from "./trace.ts";
  */
 export const DEFAULT_PROMPT_TIMEOUT_MS = 1_800_000;
 
-/** Controls cancellation behavior for one in-flight ACP prompt turn. */
-export interface GeminiAcpPromptOptions {
+/** Controls cancellation behavior and observers for one in-flight ACP prompt turn. */
+export interface GeminiAcpPromptOptions extends GeminiAcpPromptObservers {
 	signal?: AbortSignal;
 	returnTextOnAbort?: boolean;
 }
@@ -40,6 +45,7 @@ const MAX_CLIENT_READ_BYTES = 1_000_000;
 interface PromptState {
 	accumulatedText: string;
 	onUpdate?: GeminiAcpPromptUpdateHandler;
+	onActivity?: GeminiAcpPromptObservers["onActivity"];
 }
 
 /** Normalized subset of ACP initialize capabilities used for feature preflight. */
@@ -176,7 +182,11 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		onUpdate?: GeminiAcpPromptUpdateHandler,
 		options: GeminiAcpPromptOptions = {},
 	): Promise<string> {
-		const state: PromptState = { accumulatedText: "", onUpdate };
+		const state: PromptState = {
+			accumulatedText: "",
+			onUpdate,
+			onActivity: options.onActivity,
+		};
 		this.promptStates.set(sessionId, state);
 		traceAcp("prompt.size", {
 			connectionId: this.rpc.connectionId,
@@ -186,7 +196,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 					: prompt.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0),
 		});
 		try {
-			await this.rpc.request(
+			const result = await this.rpc.request(
 				"session/prompt",
 				{
 					sessionId,
@@ -199,6 +209,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 					abortMode: options.returnTextOnAbort ? "resolve" : "reject",
 				},
 			);
+			notifyObserver(() => options.onOutcome?.(promptOutcome(result)));
 			return state.accumulatedText.trim();
 		} finally {
 			this.promptStates.delete(sessionId);
@@ -213,9 +224,20 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 	private async handleAgentRequest(message: JsonRpcRequest): Promise<unknown> {
 		if (message.method === "session/request_permission") {
 			const optionId = permissionOptionId(message.params, this.permissionPolicy);
+			const capability = permissionCapabilityForRequest(message.params);
+			const toolCall = asRecord(asRecord(message.params)?.toolCall);
+			const kind = acpToolKind(toolCall?.kind);
 			traceAcp("permission", {
 				connectionId: this.rpc.connectionId,
-				capability: permissionCapabilityForRequest(message.params) ?? "unknown",
+				capability: capability ?? "unknown",
+				kind,
+				outcome: optionId ? "selected" : "cancelled",
+			});
+			this.emitActivity(this.promptStateForUpdate(asRecord(message.params), {}), {
+				type: "permission",
+				kind,
+				title: coerceString(toolCall?.title),
+				capability,
 				outcome: optionId ? "selected" : "cancelled",
 			});
 			return {
@@ -282,13 +304,41 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			connectionId: this.rpc.connectionId,
 			update: coerceString(update?.sessionUpdate) ?? "other",
 		});
-		if (update?.sessionUpdate !== "agent_message_chunk") return;
-		const content = asRecord(update.content);
-		if (content?.type !== "text" || typeof content.text !== "string") return;
+		if (!update) return;
 		const state = this.promptStateForUpdate(record, update);
 		if (!state) return;
-		state.accumulatedText += content.text;
-		this.emitPromptUpdate(state, content.text);
+		switch (update.sessionUpdate) {
+			case "agent_message_chunk": {
+				const text = textContent(update.content);
+				if (text === undefined) return;
+				state.accumulatedText += text;
+				this.emitPromptUpdate(state, text);
+				return;
+			}
+			case "agent_thought_chunk": {
+				const text = textContent(update.content);
+				if (text !== undefined) this.emitActivity(state, { type: "thought", text });
+				return;
+			}
+			case "tool_call":
+			case "tool_call_update":
+				this.emitActivity(state, {
+					type: "tool",
+					toolCallId: coerceString(update.toolCallId),
+					kind: acpToolKind(update.kind),
+					status: coerceString(update.status),
+					title: coerceString(update.title),
+				});
+				return;
+			default:
+				// Other updates (plans, mode and command lists, usage) are traced above only.
+				break;
+		}
+	}
+
+	private emitActivity(state: PromptState | undefined, activity: GeminiAcpPromptActivity): void {
+		const onActivity = state?.onActivity;
+		if (onActivity) notifyObserver(() => onActivity(activity));
 	}
 
 	private promptStateForUpdate(
@@ -362,6 +412,51 @@ function permissionCapabilityForRequest(
 		return "filesystemRead";
 	}
 	return undefined;
+}
+
+/** Observers must not destabilize the ACP session. */
+function notifyObserver(callback: () => void): void {
+	try {
+		callback();
+	} catch {
+		/* ignored */
+	}
+}
+
+function textContent(value: unknown): string | undefined {
+	const content = asRecord(value);
+	return content?.type === "text" && typeof content.text === "string" ? content.text : undefined;
+}
+
+/** Reads Gemini CLI's `session/prompt` result: `stopReason` and `_meta.quota` token counts. */
+function promptOutcome(result: unknown): GeminiAcpPromptOutcome {
+	const record = asRecord(result);
+	const quota = asRecord(asRecord(record?.["_meta"])?.quota);
+	return { stopReason: coerceString(record?.stopReason), usage: quotaUsage(quota) };
+}
+
+function quotaUsage(quota: Record<string, unknown> | undefined): GeminiAcpPromptUsage | undefined {
+	const total = tokenCount(quota?.token_count);
+	if (!total) return undefined;
+	const models = Array.isArray(quota?.model_usage) ? quota.model_usage : [];
+	return {
+		...total,
+		models: models.flatMap((entry) => {
+			const record = asRecord(entry);
+			const model = coerceString(record?.model);
+			const counts = tokenCount(record?.token_count);
+			return model && counts ? [{ model, ...counts }] : [];
+		}),
+	};
+}
+
+function tokenCount(value: unknown): { inputTokens: number; outputTokens: number } | undefined {
+	const record = asRecord(value);
+	const inputTokens = record?.input_tokens;
+	const outputTokens = record?.output_tokens;
+	if (typeof inputTokens !== "number" || typeof outputTokens !== "number") return undefined;
+	if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return undefined;
+	return { inputTokens, outputTokens };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

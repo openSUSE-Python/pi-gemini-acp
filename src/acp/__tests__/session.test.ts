@@ -36,12 +36,18 @@ rl.on('line', line => {
       send({ id: promptId, error: { code: -32603, message: 'permission incorrectly denied' } });
     } else {
       send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
-        sessionUpdate: 'tool_call', title: 'SECRET_COMMAND', kind: 'edit'
+        sessionUpdate: 'tool_call', toolCallId: 'call-1', status: 'in_progress', title: 'SECRET_COMMAND', kind: 'edit'
+      } } });
+      send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
+        sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed'
       } } });
       send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
         sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'SECRET_ANSWER' }
       } } });
-      send({ id: promptId, result: { stopReason: 'end_turn' } });
+      send({ id: promptId, result: { stopReason: 'end_turn', _meta: { quota: {
+        token_count: { input_tokens: 120, output_tokens: 7 },
+        model_usage: [{ model: 'gemini-2.5-flash', token_count: { input_tokens: 120, output_tokens: 7 } }]
+      } } } });
     }
   }
 });
@@ -94,12 +100,57 @@ describe("ACP session protocol and diagnostics", () => {
 				expect.objectContaining({
 					event: "permission",
 					capability: "filesystemWrite",
+					kind: "edit",
 					outcome: "selected",
 				}),
 				expect.objectContaining({ event: "prompt.size", inputChars: 13 }),
 			]),
 		);
 		expect(new Set(records.map((record) => record.connectionId)).size).toBe(1);
+	});
+
+	it("reports thoughts, tool calls, permission decisions and token usage to observers", async () => {
+		const { session: active, id } = await start();
+		const activity: unknown[] = [];
+		const outcomes: unknown[] = [];
+		await active.prompt(id, "go", undefined, {
+			onActivity: (item) => activity.push(item),
+			onOutcome: (outcome) => outcomes.push(outcome),
+		});
+		expect(activity).toEqual([
+			{ type: "thought", text: "SECRET_THOUGHT" },
+			{
+				type: "permission",
+				kind: "edit",
+				title: "SECRET_PATH",
+				capability: "filesystemWrite",
+				outcome: "selected",
+			},
+			{
+				type: "tool",
+				toolCallId: "call-1",
+				kind: "edit",
+				status: "in_progress",
+				title: "SECRET_COMMAND",
+			},
+			{
+				type: "tool",
+				toolCallId: "call-1",
+				kind: undefined,
+				status: "completed",
+				title: undefined,
+			},
+		]);
+		expect(outcomes).toEqual([
+			{
+				stopReason: "end_turn",
+				usage: {
+					inputTokens: 120,
+					outputTokens: 7,
+					models: [{ model: "gemini-2.5-flash", inputTokens: 120, outputTokens: 7 }],
+				},
+			},
+		]);
 	});
 
 	it.skipIf(process.platform === "win32")("creates private trace files", async () => {

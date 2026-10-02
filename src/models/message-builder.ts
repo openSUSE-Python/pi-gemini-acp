@@ -50,6 +50,13 @@ export class AssistantMessageBuilder {
 		});
 	}
 
+	/** Appends a progress line to the thinking text, starting on a new line. */
+	appendThinkingLine(line: string): void {
+		const open = this.open?.type === "thinking" ? this.open : undefined;
+		const separator = open && open.thinking.length > 0 && !open.thinking.endsWith("\n") ? "\n" : "";
+		this.appendThinking(`${separator}${line}\n`);
+	}
+
 	/** Closes the open block and returns the content of the finished message. */
 	finish(): Block[] {
 		this.closeOpenBlock();

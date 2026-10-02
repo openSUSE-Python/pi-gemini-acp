@@ -11,6 +11,7 @@ import { coerceFiniteNumber, coerceString } from "../utils/coerce.ts";
 import { createGeminiAcpSearchEarlyStop } from "./search-early-stop.ts";
 import { searchPrompt } from "./search-prompt.ts";
 import { AcpProcessSession, permissionOptionId } from "./session.ts";
+import type { AcpToolKind } from "./tool-kind.ts";
 
 export { permissionOptionId };
 
@@ -65,6 +66,45 @@ export interface GeminiAcpPromptChunk {
 /** Callback for prompt chunk updates exposed by fake and stdio ACP clients. */
 export type GeminiAcpPromptUpdateHandler = (update: GeminiAcpPromptChunk) => void | Promise<void>;
 
+/** Gemini's progress during a prompt, besides its answer text. */
+export type GeminiAcpPromptActivity =
+	| { type: "thought"; text: string }
+	| {
+			type: "tool";
+			toolCallId?: string;
+			kind?: AcpToolKind;
+			/** ACP status: pending, in_progress, completed or failed. */
+			status?: string;
+			title?: string;
+	  }
+	| {
+			type: "permission";
+			kind?: AcpToolKind;
+			title?: string;
+			capability?: "filesystemRead" | "filesystemWrite" | "terminal";
+			outcome: "selected" | "cancelled";
+	  };
+
+/** Token counts Gemini CLI reports for a finished prompt. */
+export interface GeminiAcpPromptUsage {
+	inputTokens: number;
+	outputTokens: number;
+	/** Per-model counts; with `gemini-auto` this names the model that served the turn. */
+	models: Array<{ model: string; inputTokens: number; outputTokens: number }>;
+}
+
+/** How a prompt ended, as reported by the agent's `session/prompt` response. */
+export interface GeminiAcpPromptOutcome {
+	stopReason?: string;
+	usage?: GeminiAcpPromptUsage;
+}
+
+/** Optional observers for one prompt. */
+export interface GeminiAcpPromptObservers {
+	onActivity?: (activity: GeminiAcpPromptActivity) => void;
+	onOutcome?: (outcome: GeminiAcpPromptOutcome) => void;
+}
+
 /** Narrow Gemini ACP capability surface used by Pi tools. */
 export interface GeminiAcpClient {
 	search(
@@ -76,6 +116,7 @@ export interface GeminiAcpClient {
 		request: GeminiAcpPromptRequest,
 		signal?: AbortSignal,
 		onUpdate?: GeminiAcpPromptUpdateHandler,
+		observers?: GeminiAcpPromptObservers,
 	): Promise<string>;
 }
 
@@ -114,12 +155,16 @@ export class StdioGeminiAcpClient implements GeminiAcpClient {
 		request: GeminiAcpPromptRequest,
 		signal?: AbortSignal,
 		onUpdate?: GeminiAcpPromptUpdateHandler,
+		observers?: GeminiAcpPromptObservers,
 	): Promise<string> {
 		const session = await AcpProcessSession.start(this.settings, signal);
 		try {
 			await session.initialize();
 			const sessionId = await session.newSession(sessionCwd(request.cwd));
-			return await session.prompt(sessionId, requestToParts(request), onUpdate, { signal });
+			return await session.prompt(sessionId, requestToParts(request), onUpdate, {
+				...observers,
+				signal,
+			});
 		} finally {
 			await session.close();
 		}

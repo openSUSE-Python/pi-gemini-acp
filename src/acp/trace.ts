@@ -1,6 +1,8 @@
 /** Opt-in metadata-only diagnostics. Never pass prompts, paths, titles, or error messages here. */
 import { appendFileSync } from "node:fs";
 
+import { ACP_TOOL_KINDS } from "./tool-kind.ts";
+
 export interface TraceFields {
 	connectionId?: number;
 	method?: string;
@@ -11,6 +13,8 @@ export interface TraceFields {
 	outcome?: "ok" | "error" | "aborted" | "timeout" | "selected" | "cancelled";
 	capability?: "filesystemRead" | "filesystemWrite" | "terminal" | "unknown";
 	update?: string;
+	/** ACP tool kind of a permission request. */
+	kind?: string;
 }
 
 const METHODS = new Set([
@@ -51,6 +55,12 @@ export function traceAcp(event: string, fields: TraceFields = {}): void {
 						? undefined
 						: METHODS.has(fields.method)
 							? fields.method
+							: "other",
+				kind:
+					fields.kind === undefined
+						? undefined
+						: (ACP_TOOL_KINDS as readonly string[]).includes(fields.kind)
+							? fields.kind
 							: "other",
 				update:
 					fields.update === undefined
