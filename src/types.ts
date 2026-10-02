@@ -152,6 +152,12 @@ export interface GeminiAcpChatSettings {
 	 * undefined is unlimited.
 	 */
 	maxHistoryMessages?: number | undefined;
+	/**
+	 * Character budget for the prompt sent to a fresh Gemini session, including the preamble or
+	 * system prompt. Older tool results are shortened, then the oldest messages dropped. Undefined
+	 * uses 200,000; 0 or less disables it.
+	 */
+	maxHistoryChars?: number | undefined;
 }
 
 /** Failover configuration for multi-account ACP rotation. */

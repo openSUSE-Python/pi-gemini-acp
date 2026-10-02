@@ -334,6 +334,35 @@ describe("createGeminiAcpStreamSimple", () => {
 		]);
 	});
 
+	it("counts the system prompt against maxHistoryChars", async () => {
+		const prompt = vi.fn(async () => "ok");
+		const client = { prompt, search: vi.fn() } as unknown as GeminiAcpClient;
+		await makeStream(client, {
+			appendSystemPrompt: false,
+			appendAgents: false,
+			appendTools: false,
+			maxHistoryChars: 100,
+		})(
+			fakeModel(),
+			fakeContext({
+				systemPrompt: "S".repeat(80),
+				messages: [
+					{ role: "user", content: "old request", timestamp: 0 },
+					{ role: "user", content: "current request", timestamp: 1 },
+				],
+			}),
+		).result();
+		const request = (
+			prompt.mock.calls as unknown as Array<[{ parts: Array<{ text: string }> }]>
+		)[0][0];
+		// 80 characters of system prompt leave 20: "User: old request" no longer fits.
+		expect(request.parts.map((p) => p.text)).toEqual([
+			"S".repeat(80),
+			"[1 earlier message omitted to stay within chat.maxHistoryChars]",
+			"User: current request",
+		]);
+	});
+
 	it("keeps only the current message when maxHistoryMessages is zero", async () => {
 		const prompt = vi.fn(async () => "ok");
 		const client = { prompt, search: vi.fn() } as unknown as GeminiAcpClient;
