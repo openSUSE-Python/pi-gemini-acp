@@ -46,10 +46,25 @@ export interface GeminiAcpResourceLinkPart {
 /** ACP prompt content block accepted by the narrow Pi Gemini client. */
 export type GeminiAcpPromptPart = { type: "text"; text: string } | GeminiAcpResourceLinkPart;
 
+/**
+ * Lets a cached client continue the Gemini session that already holds an earlier part of the
+ * conversation. Without it, or when no such session exists, `parts` is sent to a fresh session.
+ */
+export interface GeminiAcpConversation {
+	/** Hash of what primed the session besides the messages: model, preamble, system prompt. */
+	contextKey: string;
+	/** Fingerprints of all conversation messages, oldest first, ending with the current request. */
+	transcript: readonly string[];
+	/** Prompt parts for `transcript[from..]`, for a session that has seen everything before it. */
+	continuationParts(from: number): GeminiAcpPromptPart[];
+	/** Fingerprint of the assistant message Pi will store for this answer text. */
+	replyFingerprint(text: string): string;
+}
+
 /** Prompt sent through ACP: either a plain text prompt or structured parts. */
 export type GeminiAcpPromptRequest =
 	| { prompt: string; cwd?: string }
-	| { parts: GeminiAcpPromptPart[]; cwd?: string };
+	| { parts: GeminiAcpPromptPart[]; cwd?: string; conversation?: GeminiAcpConversation };
 
 /** Normalizes a discriminated prompt request into a parts array. */
 export function requestToParts(request: GeminiAcpPromptRequest): GeminiAcpPromptPart[] {

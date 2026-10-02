@@ -10,11 +10,13 @@ import {
 	defaultGeminiAcpIdleTtlMs,
 	GeminiAcpClientCache,
 } from "../client-cache.ts";
-import type { GeminiAcpCommandSettings } from "../client.ts";
+import type { GeminiAcpCommandSettings, GeminiAcpConversation } from "../client.ts";
 import { JsonRpcTransportError } from "../jsonrpc-stdio.ts";
 import type { GeminiAcpProcessSession, GeminiAcpPromptOptions } from "../session.ts";
 
 const originalCwd = process.cwd();
+const OVERFLOW_MESSAGE =
+	"The input token count exceeds the maximum number of tokens allowed 1048576.";
 
 afterEach(() => {
 	process.chdir(originalCwd);
@@ -336,6 +338,161 @@ describe("GeminiAcpClientCache", () => {
 		await cache.close();
 	});
 
+	describe("chat conversations", () => {
+		/** A turn whose history is `transcript`; the fake session answers `reply`. */
+		const turn = (transcript: string[], contextKey = "ctx") => {
+			const conversation: GeminiAcpConversation = {
+				contextKey,
+				transcript,
+				continuationParts: (from) =>
+					transcript.slice(from).map((text) => ({ type: "text" as const, text: `new:${text}` })),
+				replyFingerprint: () => "reply",
+			};
+			return {
+				parts: transcript.map((text) => ({ type: "text" as const, text: `full:${text}` })),
+				cwd: originalCwd,
+				conversation,
+			};
+		};
+
+		it("continues the session that holds the earlier messages and sends only new ones", async () => {
+			const factory = new FakeSessionFactory();
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			await client.prompt(turn(["u1", "reply", "u2", "reply", "tool", "u3"]));
+			const session = factory.sessions[0];
+			expect(session?.newSessionCalls).toBe(1);
+			expect(session?.promptSessionIds).toEqual(["session-1", "session-1", "session-1"]);
+			expect(session?.prompts).toEqual([
+				[{ type: "text", text: "full:u1" }],
+				[{ type: "text", text: "new:u2" }],
+				[
+					{ type: "text", text: "new:tool" },
+					{ type: "text", text: "new:u3" },
+				],
+			]);
+			await cache.close();
+		});
+
+		it("starts a fresh session after a branch switch or a context change", async () => {
+			const factory = new FakeSessionFactory();
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["other", "reply", "u2"]));
+			await client.prompt(turn(["other", "reply", "u2", "reply", "u3"], "new-context"));
+			expect(factory.sessions[0]?.promptSessionIds).toEqual([
+				"session-1",
+				"session-2",
+				"session-3",
+			]);
+			expect(factory.sessions[0]?.prompts[2]).toEqual([
+				{ type: "text", text: "full:other" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u2" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u3" },
+			]);
+			// The first conversation is still continuable from its own branch.
+			await client.prompt(turn(["u1", "reply", "u4"]));
+			expect(factory.sessions[0]?.promptSessionIds.at(-1)).toBe("session-1");
+			await cache.close();
+		});
+
+		it("does not continue a session whose turn failed", async () => {
+			const factory = new FakeSessionFactory({ failPromptAfterCount: 1 });
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await expect(client.prompt(turn(["u1", "reply", "u2"]))).rejects.toThrow("planned failure");
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			expect(factory.sessions[0]?.promptSessionIds).toEqual([
+				"session-1",
+				"session-1",
+				"session-2",
+			]);
+			await cache.close();
+		});
+
+		it("starts a fresh session once the continued one reported too many input tokens", async () => {
+			const factory = new FakeSessionFactory({ inputTokens: [1_000, 700_000, 2_000] });
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			await client.prompt(turn(["u1", "reply", "u2", "reply", "u3"]));
+			const session = factory.sessions[0];
+			expect(session?.promptSessionIds).toEqual(["session-1", "session-1", "session-2"]);
+			expect(session?.prompts[2]).toEqual(
+				["u1", "reply", "u2", "reply", "u3"].map((text) => ({
+					type: "text",
+					text: `full:${text}`,
+				})),
+			);
+			await cache.close();
+		});
+
+		it("honours PI_GEMINI_ACP_MAX_SESSION_INPUT_TOKENS", async () => {
+			vi.stubEnv("PI_GEMINI_ACP_MAX_SESSION_INPUT_TOKENS", "500");
+			const factory = new FakeSessionFactory({ inputTokens: [1_000, 1_000] });
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			expect(factory.sessions[0]?.promptSessionIds).toEqual(["session-1", "session-2"]);
+			await cache.close();
+		});
+
+		it("retries a continued turn on a fresh session when Gemini reports a context overflow", async () => {
+			const factory = new FakeSessionFactory({
+				failPromptAfterCount: 1,
+				promptError: new Error(OVERFLOW_MESSAGE),
+			});
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			const session = factory.sessions[0];
+			expect(session?.promptSessionIds).toEqual(["session-1", "session-1", "session-2"]);
+			expect(session?.prompts[2]).toEqual([
+				{ type: "text", text: "full:u1" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u2" },
+			]);
+			await cache.close();
+		});
+
+		it("does not retry an overflow after Gemini already produced output", async () => {
+			const factory = new FakeSessionFactory({
+				failPromptAfterCount: 1,
+				promptError: new Error(OVERFLOW_MESSAGE),
+				updateBeforeFailure: true,
+			});
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await expect(client.prompt(turn(["u1", "reply", "u2"]))).rejects.toThrow(
+				"input token count exceeds",
+			);
+			expect(factory.sessions[0]?.promptCalls).toBe(2);
+			await cache.close();
+		});
+
+		it("does not retry an overflow on a fresh session", async () => {
+			const factory = new FakeSessionFactory({
+				failFirstPrompt: true,
+				promptError: new Error(OVERFLOW_MESSAGE),
+			});
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await expect(client.prompt(turn(["u1"]))).rejects.toThrow("input token count exceeds");
+			expect(factory.sessions[0]?.promptCalls).toBe(1);
+			await cache.close();
+		});
+	});
+
 	it("passes prompt AbortSignal into fresh cached prompt sessions without closing the warm process", async () => {
 		const factory = new FakeSessionFactory({ waitForClosePrompt: true });
 		const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
@@ -597,6 +754,12 @@ class FakeSessionFactory {
 		private readonly options: {
 			failFirstPrompt?: boolean;
 			failPromptAfterCount?: number;
+			/** Error thrown by the planned failure instead of "planned failure". */
+			promptError?: Error;
+			/** Stream a chunk before the planned failure, as if Gemini had started answering. */
+			updateBeforeFailure?: boolean;
+			/** Input tokens reported for each successful prompt, in order. */
+			inputTokens?: number[];
 			delayedPrompt?: boolean;
 			resolvePromptOnAbort?: boolean;
 			waitForClosePrompt?: boolean;
@@ -606,6 +769,18 @@ class FakeSessionFactory {
 		this.promptFailuresRemaining =
 			options.failPromptAfterCount !== undefined ? 1 : options.failFirstPrompt ? 1 : 0;
 		this.waitForClosePromptsRemaining = options.waitForClosePrompt ? 1 : 0;
+	}
+
+	plannedFailure(): Error {
+		return this.options.promptError ?? new Error("planned failure");
+	}
+
+	updateBeforeFailure(): boolean {
+		return this.options.updateBeforeFailure === true;
+	}
+
+	nextInputTokens(): number | undefined {
+		return this.options.inputTokens?.shift();
 	}
 
 	create = async (): Promise<GeminiAcpProcessSession> => {
@@ -664,6 +839,7 @@ class FakeSession implements GeminiAcpProcessSession {
 	readonly cwds: string[] = [];
 	readonly promptSignals: Array<AbortSignal | undefined> = [];
 	readonly promptSessionIds: Array<string | undefined> = [];
+	readonly prompts: unknown[] = [];
 	private activePrompts = 0;
 	private closePromptReject?: (error: Error) => void;
 
@@ -693,9 +869,22 @@ class FakeSession implements GeminiAcpProcessSession {
 		options?: GeminiAcpPromptOptions,
 	): Promise<string> {
 		this.promptSessionIds.push(_sessionId);
+		this.prompts.push(_prompt);
 		this.promptSignals.push(options?.signal);
 		this.promptCalls += 1;
-		if (this.factory.shouldFailPrompt()) throw new Error("planned failure");
+		if (this.factory.shouldFailPrompt()) {
+			if (this.factory.updateBeforeFailure() && typeof _onUpdate === "function") {
+				await _onUpdate({ type: "chunk", text: "partial", accumulatedText: "partial" });
+			}
+			throw this.factory.plannedFailure();
+		}
+		const inputTokens = this.factory.nextInputTokens();
+		if (inputTokens !== undefined) {
+			options?.onOutcome?.({
+				stopReason: "end_turn",
+				usage: { inputTokens, outputTokens: 1, models: [] },
+			});
+		}
 		this.activePrompts += 1;
 		this.maxConcurrentPrompts = Math.max(this.maxConcurrentPrompts, this.activePrompts);
 		try {

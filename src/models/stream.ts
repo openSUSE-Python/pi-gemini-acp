@@ -8,7 +8,6 @@ import {
 	type AssistantMessage,
 	type Context,
 	type Model,
-	type TextContent,
 } from "@earendil-works/pi-ai";
 
 import { executeWithAccountPool } from "../acp/account-pool-singleton.ts";
@@ -16,6 +15,7 @@ import { getCachedGeminiAcpClient } from "../acp/client-cache.ts";
 import type {
 	GeminiAcpClient,
 	GeminiAcpCommandSettings,
+	GeminiAcpConversation,
 	GeminiAcpPromptOutcome,
 	GeminiAcpPromptPart,
 	GeminiAcpPromptUpdateHandler,
@@ -28,29 +28,31 @@ import type {
 	GeminiAcpProviderSettings,
 } from "../types.ts";
 import { createActivityRenderer } from "./activity.ts";
+import { buildConversation } from "./conversation.ts";
 import { AssistantMessageBuilder } from "./message-builder.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
-import {
-	conversationMessages,
-	currentSystemPrompt,
-	type ConversationMessage,
-} from "./transcript.ts";
+import { conversationMessages, currentSystemPrompt, messageToText } from "./transcript.ts";
 import type { GeminiAcpStreamSimple } from "./types.ts";
 
 // Pi's Api type is KnownApi | (string & {}); it accepts any string routing key.
 // We use "gemini-acp" as a custom provider identifier, matching pi-claude-bridge's pattern.
 const GEMINI_ACP_API: Api = "gemini-acp";
 
-/** Builds a single ACP prompt request from Pi's multi-turn Context. */
+/**
+ * Builds the ACP prompt request for one chat turn. `parts` holds the full flattened history for a
+ * fresh Gemini session; `conversation` lets the cached client continue the session that already
+ * holds the earlier messages and send only the new ones.
+ */
 function buildAcpPromptRequest(
 	context: Context,
-	preamble?: string,
-	maxHistoryMessages?: number,
-): { parts: GeminiAcpPromptPart[] } {
+	modelId: string,
+	preamble: string | undefined,
+	maxHistoryMessages: number | undefined,
+): { parts: GeminiAcpPromptPart[]; conversation: GeminiAcpConversation } {
 	const parts: GeminiAcpPromptPart[] = [];
 	// An empty preamble (every section disabled) falls back to Pi's own system prompt.
 	const systemPrompt =
-		preamble !== undefined && preamble.length > 0 ? preamble : currentSystemPrompt(context);
+		(preamble !== undefined && preamble.length > 0 ? preamble : currentSystemPrompt(context)) ?? "";
 	if (systemPrompt) parts.push({ type: "text", text: systemPrompt });
 	const conversation = conversationMessages(context);
 	const messages =
@@ -58,36 +60,12 @@ function buildAcpPromptRequest(
 			? conversation.slice(-Math.max(1, Math.floor(maxHistoryMessages)))
 			: conversation;
 	for (const msg of messages) {
-		const text = messageToText(msg);
-		if (text) parts.push({ type: "text", text });
+		parts.push({ type: "text", text: messageToText(msg) });
 	}
-	return { parts };
-}
-
-/** Flattens one Pi Message into a text fragment for the ACP prompt. */
-function messageToText(msg: ConversationMessage): string | undefined {
-	if (msg.role === "user") {
-		const text = typeof msg.content === "string" ? msg.content : extractText(msg.content);
-		return `User: ${text}`;
-	}
-	if (msg.role === "assistant") {
-		return `Assistant: ${extractText(msg.content)}`;
-	}
-	// Remaining Message union member is toolResult; TypeScript narrows here.
-	return `Tool (${msg.toolName}): ${extractText(msg.content)}`;
-}
-
-/** Extracts plain text from Pi content blocks. */
-function extractText(content: unknown): string {
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((c): c is TextContent => {
-			if (typeof c !== "object" || c === null) return false;
-			const obj = c as Record<string, unknown>;
-			return obj.type === "text" && typeof obj.text === "string";
-		})
-		.map((c) => c.text)
-		.join("");
+	return {
+		parts,
+		conversation: buildConversation(conversation, `${modelId}\0${systemPrompt}`),
+	};
 }
 
 /** Creates a fresh partial AssistantMessage skeleton. */
@@ -223,7 +201,7 @@ export function createGeminiAcpStreamSimple(
 				});
 
 				const built = {
-					...buildAcpPromptRequest(context, preamble, chatConfig.maxHistoryMessages),
+					...buildAcpPromptRequest(context, model.id, preamble, chatConfig.maxHistoryMessages),
 					cwd: resolveCwd(options),
 				};
 				// Extensions may inspect or replace the request, as with built-in providers.

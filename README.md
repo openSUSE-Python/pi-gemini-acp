@@ -133,6 +133,7 @@ export PI_GEMINI_ACP_STARTUP_TIMEOUT_MS=60000 # deadline per initialize/session-
 export PI_GEMINI_ACP_PROMPT_TIMEOUT_MS=1800000 # total deadline per ACP prompt
 export PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS=600000 # cancel a prompt with no progress for this long (0 disables)
 export PI_GEMINI_ACP_MAX_PROMPT_SESSIONS=25 # restart the warm chat process after this many turns
+export PI_GEMINI_ACP_MAX_SESSION_INPUT_TOKENS=600000 # stop continuing a chat session past this many input tokens
 export PI_GEMINI_ACP_SEARCH_EARLY_STOP=0 # optional: opt out of streamed JSON early-stop (enabled by default)
 export PI_GEMINI_ACP_SEARCH_PARALLEL=0 # optional: opt out of parallel live searches (enabled by default)
 export PI_GEMINI_ACP_CACHE=0 # optional: disable persistent response cache
@@ -158,7 +159,7 @@ Environment variables take precedence over `settings.json` values. The model use
 ### Runtime behavior
 
 - **Search:** defaults to 4 results. Live ACP searches run in parallel and stop early once a complete JSON result array is streamed (both enabled by default). Use `PI_GEMINI_ACP_SEARCH_PARALLEL=0` to serialize, or `PI_GEMINI_ACP_SEARCH_EARLY_STOP=0` to wait for the full turn.
-- **ACP sessions:** subprocesses stay warm for 15 idle minutes. Each prompt consumes a fresh conversation because the chat adapter already sends Pi's history. The chat prewarm starts when a session starts or the model changes, and only when a Gemini ACP model is selected, so it uses the same model as the first turn. A prewarmed prompt session is used once, never for successive turns. ACP cannot end a conversation, so the warm process is restarted once idle after 25 turns (`PI_GEMINI_ACP_MAX_PROMPT_SESSIONS`) to keep old conversations from accumulating in memory. Search sessions remain reusable. `PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm.
+- **ACP sessions:** subprocesses stay warm for 15 idle minutes. A chat continues the Gemini session that already holds its earlier messages and sends only the new ones (the latest request, plus any messages from other models in between). After a branch switch, compaction, a change of model, system prompt or working directory, a failed or aborted turn, or a process restart, the turn starts a fresh session with the whole history. Gemini CLI keeps its own tool calls and their output in the session, so a continued session can grow well past the history Pi sends. Once a turn reports 600,000 input tokens or more (`PI_GEMINI_ACP_MAX_SESSION_INPUT_TOKENS`), the next turn starts a fresh session instead. If Gemini still rejects a continued session as larger than its input limit before answering, the turn is retried once on a fresh session. The chat prewarm starts when a session starts or the model changes, and only when a Gemini ACP model is selected, so it uses the same model as the first turn. ACP cannot end a session, so the warm process is restarted once idle after 25 fresh sessions (`PI_GEMINI_ACP_MAX_PROMPT_SESSIONS`) to keep abandoned ones from accumulating in memory. Search sessions remain reusable. `PI_GEMINI_ACP_NO_PREWARM=1` disables both chat and search prewarm.
 - **Deadlines:** initialization and session creation each have a 60-second deadline; prompts have a 30-minute total deadline, long enough for agentic edit/test loops. A prompt that sends no progress (answer text, thoughts, tool or permission updates) for 10 minutes while none of Gemini's tools is running is treated as stalled and cancelled; a long-running build or test does not count. Positive millisecond overrides are shown above. A timeout invalidates the connection. Transport failures and timeouts do not trigger account retries or failover, since an action may already have completed. Check the working tree or remote state before retrying.
 - **Streaming UI:** Gemini-backed calls surface backend-wait/first-token progress and a `~N tokens · ~$X` cost estimate on the completed title row (informational, may not match billing).
 - **Chat usage:** chat turns report the token counts Gemini CLI returns, priced for the model that served the turn (with `gemini-auto`, Flash or Pro). The price table is informational and may not match billing.
@@ -300,7 +301,7 @@ When Gemini ACP is selected as the active Pi model, every prompt is prefixed wit
 
 Set any flag to `false` in `~/.pi/gemini-acp/config/settings.json` to suppress that section.
 
-`chat.maxHistoryMessages` limits the number of messages sent, including the current request. The default is unlimited. A value of `0` sends only the latest message. This is a message-count limit, not a token limit; one large tool result can still dominate the prompt.
+`chat.maxHistoryMessages` limits the number of messages sent to a fresh Gemini session, including the current request. The default is unlimited. A value of `0` sends only the latest message. This is a message-count limit, not a token limit; one large tool result can still dominate the prompt. A continued session already holds the earlier messages, so only new messages are sent and this limit does not apply.
 
 ## Model adapter for pi-scraper
 

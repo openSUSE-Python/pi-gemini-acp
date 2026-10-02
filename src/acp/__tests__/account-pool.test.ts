@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { ResolvedAccountsConfig } from "../account-config.ts";
 import { AccountPool, allAccountsCooledDown, type CooldownEntry } from "../account-pool.ts";
-import { JsonRpcTimeoutError, JsonRpcTransportError } from "../jsonrpc-stdio.ts";
+import {
+	JsonRpcResponseError,
+	JsonRpcTimeoutError,
+	JsonRpcTransportError,
+} from "../jsonrpc-stdio.ts";
 
 function makeConfig(
 	names: string[],
@@ -37,6 +41,23 @@ describe("AccountPool", () => {
 			expect(pool.getStatus().cooldowns).toEqual([]);
 		},
 	);
+
+	it("does not fail over or cool down an account on a context overflow", async () => {
+		pool = new AccountPool(makeConfig(["a", "b"], { codes: [-32000] }));
+		let calls = 0;
+		const failure = new JsonRpcResponseError(
+			-32000,
+			"The input token count exceeds the maximum number of tokens allowed 1048576.",
+		);
+		await expect(
+			pool.execute(async () => {
+				calls += 1;
+				throw failure;
+			}),
+		).rejects.toBe(failure);
+		expect(calls).toBe(1);
+		expect(pool.getStatus().cooldowns).toEqual([]);
+	});
 
 	it("executes operation with first account env", async () => {
 		pool = new AccountPool(makeConfig(["a", "b"]));

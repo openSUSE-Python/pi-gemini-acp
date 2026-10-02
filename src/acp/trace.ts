@@ -9,6 +9,8 @@ export interface TraceFields {
 	requestId?: number;
 	durationMs?: number;
 	inputChars?: number;
+	/** Input tokens Gemini CLI reported for a prompt turn (the whole session context it sent). */
+	inputTokens?: number;
 	code?: number;
 	outcome?: "ok" | "error" | "aborted" | "timeout" | "selected" | "cancelled";
 	capability?: "filesystemRead" | "filesystemWrite" | "terminal" | "unknown";
