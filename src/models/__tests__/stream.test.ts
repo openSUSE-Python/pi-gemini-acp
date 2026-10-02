@@ -40,7 +40,7 @@ function fakeContext(overrides?: Partial<Context>): Context {
 }
 
 describe("createGeminiAcpStreamSimple", () => {
-	it("emits start, text_delta, and done for a successful prompt", async () => {
+	it("emits balanced text events and done for a successful prompt", async () => {
 		const client = {
 			prompt: vi.fn(async (_req, _signal, onUpdate) => {
 				onUpdate?.({ type: "chunk", text: "Hello ", accumulatedText: "Hello " });
@@ -51,20 +51,25 @@ describe("createGeminiAcpStreamSimple", () => {
 		} as unknown as GeminiAcpClient;
 
 		const stream = makeStream(client)(fakeModel(), fakeContext());
-		const events: unknown[] = [];
+		const events: Array<{ type: string; delta?: string; content?: string }> = [];
 		for await (const ev of stream) {
-			events.push(ev);
+			events.push(ev as (typeof events)[number]);
 		}
 
-		expect(events).toHaveLength(4);
-		expect((events[0] as { type: string }).type).toBe("start");
-		expect((events[1] as { type: string }).type).toBe("text_delta");
-		expect((events[1] as { delta: string }).delta).toBe("Hello ");
-		expect((events[2] as { type: string }).type).toBe("text_delta");
-		expect((events[2] as { delta: string }).delta).toBe("world!");
-		expect((events[3] as { type: string }).type).toBe("done");
+		expect(events.map((event) => event.type)).toEqual([
+			"start",
+			"text_start",
+			"text_delta",
+			"text_delta",
+			"text_end",
+			"done",
+		]);
+		expect(events[2].delta).toBe("Hello ");
+		expect(events[3].delta).toBe("world!");
+		expect(events[4].content).toBe("Hello world!");
 		expect(
-			(events[3] as { message: { content: { text: string }[] } }).message.content[0].text,
+			(events[5] as unknown as { message: { content: { text: string }[] } }).message.content[0]
+				.text,
 		).toBe("Hello world!");
 	});
 
@@ -79,22 +84,33 @@ describe("createGeminiAcpStreamSimple", () => {
 		} as unknown as GeminiAcpClient;
 
 		const stream = makeStream(client)(fakeModel(), fakeContext());
-		const events: unknown[] = [];
+		const deltas: Array<{ partial: { content: Array<{ type: string; text: string }> } }> = [];
 		for await (const ev of stream) {
-			events.push(ev);
+			if (ev.type === "text_delta") deltas.push(ev as unknown as (typeof deltas)[number]);
 		}
 
-		const firstDelta = events[1] as {
-			type: string;
-			partial: { content: Array<{ type: string; text: string }> };
-		};
-		const secondDelta = events[2] as {
-			type: string;
-			partial: { content: Array<{ type: string; text: string }> };
-		};
 		// If a shared textBlock were mutated, both partials would show the final accumulated text.
-		expect(firstDelta.partial.content[0].text).toBe("Hello ");
-		expect(secondDelta.partial.content[0].text).toBe("Hello world!");
+		expect(deltas[0].partial.content[0].text).toBe("Hello ");
+		expect(deltas[1].partial.content[0].text).toBe("Hello world!");
+	});
+
+	it("passes the request through onPayload and sends a replacement", async () => {
+		const prompt = vi.fn(async () => "ok");
+		const client = { prompt, search: vi.fn() } as unknown as GeminiAcpClient;
+		const onPayload = vi.fn((payload: unknown) => ({
+			...(payload as object),
+			parts: [{ type: "text", text: "replaced" }],
+		}));
+		await makeStream(client)(
+			fakeModel(),
+			fakeContext({ messages: [{ role: "user", content: "original", timestamp: 0 }] }),
+			{ onPayload },
+		).result();
+		expect(onPayload).toHaveBeenCalledOnce();
+		const request = (
+			prompt.mock.calls as unknown as Array<[{ parts: Array<{ text: string }> }]>
+		)[0][0];
+		expect(request.parts).toEqual([{ type: "text", text: "replaced" }]);
 	});
 
 	it("emits error when the ACP client throws", async () => {

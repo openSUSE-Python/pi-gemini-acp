@@ -25,6 +25,7 @@ import type {
 	GeminiAcpConfig,
 	GeminiAcpProviderSettings,
 } from "../types.ts";
+import { AssistantMessageBuilder } from "./message-builder.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
 import {
 	conversationMessages,
@@ -171,7 +172,7 @@ export function createGeminiAcpStreamSimple(
 		const stream = createAssistantMessageEventStream();
 		const partial = createPartialMessage(model);
 		stream.push({ type: "start", partial });
-		let accumulatedOutput = "";
+		const message = new AssistantMessageBuilder(stream, partial);
 
 		void (async () => {
 			try {
@@ -181,28 +182,20 @@ export function createGeminiAcpStreamSimple(
 					upstreamSystemPrompt: currentSystemPrompt(context),
 				});
 
-				const request = {
+				const built = {
 					...buildAcpPromptRequest(context, preamble, chatConfig.maxHistoryMessages),
 					cwd: resolveCwd(options),
 				};
+				// Extensions may inspect or replace the request, as with built-in providers.
+				const replaced = (await options?.onPayload?.(built, model)) as typeof built | undefined;
+				const request = replaced ?? built;
 				const inputChars = request.parts.reduce(
 					(sum, p) => sum + (p.type === "text" ? p.text.length : 0),
 					0,
 				);
 
 				const onUpdate: GeminiAcpPromptUpdateHandler = (chunk) => {
-					accumulatedOutput = chunk.accumulatedText;
-					// Fresh text object per chunk — Pi may retain partial references, so mutation of
-					// a shared block would corrupt historical chunk contents.
-					stream.push({
-						type: "text_delta",
-						contentIndex: 0,
-						delta: chunk.text,
-						partial: {
-							...partial,
-							content: [{ type: "text", text: accumulatedOutput }],
-						},
-					});
+					message.appendText(chunk.text);
 				};
 
 				const effectiveSettings = promptSettingsForModel(settings, model.id);
@@ -219,10 +212,12 @@ export function createGeminiAcpStreamSimple(
 					options?.signal,
 					rootDir,
 				);
+				// Clients that return the answer without streaming it still produce a text block.
+				if (!message.text() && result) message.appendText(result);
 
 				const final: AssistantMessage = {
 					...partial,
-					content: [{ type: "text", text: result }],
+					content: message.finish(),
 					usage: estimateUsage(inputChars, result.length, model.id),
 					// ACP prompt result is a plain string; the underlying stop reason (max_tokens,
 					// safety, etc.) is not surfaced by the current JSON-RPC protocol. If Gemini adds
@@ -238,7 +233,7 @@ export function createGeminiAcpStreamSimple(
 				const aborted = options?.signal?.aborted ?? false;
 				const final: AssistantMessage = {
 					...partial,
-					content: [{ type: "text", text: accumulatedOutput }],
+					content: message.finish(),
 					stopReason: aborted ? "aborted" : "error",
 					errorMessage,
 					timestamp: Date.now(),
