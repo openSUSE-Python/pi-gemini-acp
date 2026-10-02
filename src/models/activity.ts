@@ -48,6 +48,13 @@ export function createActivityRenderer(
 				}
 				return;
 			}
+			case "approval_mode":
+				message.appendThinkingLine(
+					activity.mode === "yolo"
+						? "⚠ Gemini CLI runs in yolo approval mode: it does not ask Pi for permission, so the Gemini ACP permission policy is not applied."
+						: "⚠ Gemini CLI runs in auto-edit approval mode: it edits files without asking Pi for permission, so the policy does not apply to edits.",
+				);
+				break;
 			case "permission":
 				if (activity.outcome === "cancelled") {
 					message.appendThinkingLine(permissionDeniedLine(activity));

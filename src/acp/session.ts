@@ -99,6 +99,10 @@ export type GeminiAcpProcessSessionFactory = (
 export class AcpProcessSession implements GeminiAcpProcessSession {
 	private readonly rpc: JsonRpcStdioClient;
 	private readonly promptStates = new Map<string, PromptState>();
+	/** Gemini CLI approval mode per session, from session/new and current_mode_update. */
+	private readonly approvalModes = new Map<string, string>();
+	/** Sessions whose permissive approval mode was already reported to a prompt observer. */
+	private readonly reportedApprovalModes = new Set<string>();
 	private sessionCwd = process.cwd();
 	private readonly allowedReadPaths: Set<string>;
 
@@ -192,6 +196,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		if (typeof sessionId !== "string") {
 			throw new TypeError("Gemini ACP did not return a sessionId");
 		}
+		this.recordApprovalMode(sessionId, asRecord(asRecord(result)?.modes)?.currentModeId);
 		return sessionId;
 	}
 
@@ -213,6 +218,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		state.touch = () => idle.touch();
 		const signal = options.signal ? AbortSignal.any([options.signal, idle.signal]) : idle.signal;
 		this.promptStates.set(sessionId, state);
+		this.reportApprovalMode(sessionId, state);
 		traceAcp("prompt.size", {
 			connectionId: this.rpc.connectionId,
 			inputChars:
@@ -353,6 +359,14 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				if (text !== undefined) this.emitActivity(state, { type: "thought", text });
 				return;
 			}
+			case "current_mode_update": {
+				const sessionId = coerceString(record?.sessionId);
+				if (sessionId) {
+					this.recordApprovalMode(sessionId, update.currentModeId);
+					this.reportApprovalMode(sessionId, state);
+				}
+				return;
+			}
 			case "tool_call":
 			case "tool_call_update":
 				trackRunningTool(state.runningTools, update);
@@ -368,6 +382,27 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				// Other updates (plans, mode and command lists, usage) are traced above only.
 				break;
 		}
+	}
+
+	private recordApprovalMode(sessionId: string, value: unknown): void {
+		const mode = coerceString(value);
+		if (!mode) return;
+		if (this.approvalModes.get(sessionId) !== mode) this.reportedApprovalModes.delete(sessionId);
+		this.approvalModes.set(sessionId, mode);
+		traceAcp("session.mode", {
+			connectionId: this.rpc.connectionId,
+			mode: isApprovalMode(mode) ? mode : "other",
+		});
+	}
+
+	/** Tells the prompt once per session and mode when Gemini will not ask for permission. */
+	private reportApprovalMode(sessionId: string, state: PromptState): void {
+		const mode = this.approvalModes.get(sessionId);
+		if ((mode !== "autoEdit" && mode !== "yolo") || this.reportedApprovalModes.has(sessionId)) {
+			return;
+		}
+		this.reportedApprovalModes.add(sessionId);
+		this.emitActivity(state, { type: "approval_mode", mode });
 	}
 
 	private emitActivity(state: PromptState | undefined, activity: GeminiAcpPromptActivity): void {
@@ -446,6 +481,12 @@ function permissionCapabilityForRequest(
 		return "filesystemRead";
 	}
 	return undefined;
+}
+
+const APPROVAL_MODES = ["default", "autoEdit", "yolo", "plan"] as const;
+
+function isApprovalMode(mode: string): mode is (typeof APPROVAL_MODES)[number] {
+	return (APPROVAL_MODES as readonly string[]).includes(mode);
 }
 
 /** Prompt idle limit in ms, or 0 when disabled with `PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS=0`. */

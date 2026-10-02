@@ -93,6 +93,11 @@ export type GeminiAcpPromptActivity =
 			title?: string;
 	  }
 	| {
+			/** Gemini CLI does not ask for permission in this mode, so Pi's policy is bypassed. */
+			type: "approval_mode";
+			mode: "autoEdit" | "yolo";
+	  }
+	| {
 			type: "permission";
 			kind?: AcpToolKind;
 			title?: string;
