@@ -11,13 +11,22 @@ export type GeminiAcpPermissionMode = (typeof GEMINI_ACP_PERMISSION_MODES)[numbe
 
 export type PermissionPolicyDisplayMode = GeminiAcpPermissionMode | "custom";
 
-export type PermissionCapability = "filesystemRead" | "filesystemWrite" | "terminal";
+export type PermissionCapability = "filesystemRead" | "filesystemWrite" | "terminal" | "webFetch";
+
+/** Every capability, in display order. */
+export const PERMISSION_CAPABILITIES: readonly PermissionCapability[] = [
+	"filesystemRead",
+	"filesystemWrite",
+	"terminal",
+	"webFetch",
+];
 
 export interface ResolvedPermissionPolicy {
 	mode: PermissionPolicyDisplayMode;
 	filesystemRead: boolean;
 	filesystemWrite: boolean;
 	terminal: boolean;
+	webFetch: boolean;
 	reason?: string;
 	updatedAt?: string;
 }
@@ -37,6 +46,7 @@ const DEFAULT_POLICY: ResolvedPermissionPolicy = {
 	filesystemRead: false,
 	filesystemWrite: false,
 	terminal: false,
+	webFetch: false,
 };
 
 /** Converts older mode-based policy records into the current capability flags. */
@@ -51,6 +61,7 @@ export function migrateLegacyPermissionPolicy(
 		filesystemRead: base.filesystemRead,
 		filesystemWrite: base.filesystemWrite,
 		terminal: base.terminal,
+		webFetch: policy.webFetch === true,
 		reason: policy.reason,
 		updatedAt: policy.updatedAt,
 	};
@@ -65,11 +76,13 @@ export function resolvePermissionPolicy(
 	const filesystemRead = migrated.filesystemRead === true;
 	const filesystemWrite = migrated.filesystemWrite === true;
 	const terminal = migrated.terminal === true;
+	const webFetch = migrated.webFetch === true;
 	return {
-		mode: modeForCapabilities(filesystemRead, filesystemWrite, terminal),
+		mode: webFetch ? "custom" : modeForCapabilities(filesystemRead, filesystemWrite, terminal),
 		filesystemRead,
 		filesystemWrite,
 		terminal,
+		webFetch,
 		reason: migrated.reason,
 		updatedAt: migrated.updatedAt,
 	};
@@ -77,13 +90,17 @@ export function resolvePermissionPolicy(
 
 /** Normalizes individual capability settings before persisting them. */
 export function normalizePermissionPolicy(
-	capabilities: Pick<GeminiAcpPermissionPolicy, "filesystemRead" | "filesystemWrite" | "terminal">,
+	capabilities: Pick<
+		GeminiAcpPermissionPolicy,
+		"filesystemRead" | "filesystemWrite" | "terminal" | "webFetch"
+	>,
 	reason?: string,
 ): GeminiAcpPermissionPolicy {
 	return {
 		filesystemRead: capabilities.filesystemRead === true,
 		filesystemWrite: capabilities.filesystemWrite === true,
 		terminal: capabilities.terminal === true,
+		webFetch: capabilities.webFetch === true,
 		reason: reason?.trim() ?? undefined,
 		updatedAt: new Date().toISOString(),
 	};
@@ -92,7 +109,7 @@ export function normalizePermissionPolicy(
 export function describePermissionPolicy(policy?: GeminiAcpPermissionPolicy): string {
 	const resolved = resolvePermissionPolicy(policy);
 	const allowed = enabledPermissionLabels(resolved);
-	return `${resolved.mode}: ${allowed.length > 0 ? allowed.join(", ") : "no filesystem or terminal access"}`;
+	return `${resolved.mode}: ${allowed.length > 0 ? allowed.join(", ") : "no filesystem, terminal or web fetch access"}`;
 }
 
 /** Session facts that affect which ACP client capabilities can be honored. */
@@ -169,6 +186,7 @@ function policyForMode(mode: GeminiAcpPermissionMode): ResolvedPermissionPolicy 
 				filesystemRead: true,
 				filesystemWrite: false,
 				terminal: false,
+				webFetch: false,
 			};
 		case "file-read-write":
 			return {
@@ -176,6 +194,7 @@ function policyForMode(mode: GeminiAcpPermissionMode): ResolvedPermissionPolicy 
 				filesystemRead: true,
 				filesystemWrite: true,
 				terminal: false,
+				webFetch: false,
 			};
 		case "terminal":
 			return {
@@ -183,6 +202,7 @@ function policyForMode(mode: GeminiAcpPermissionMode): ResolvedPermissionPolicy 
 				filesystemRead: false,
 				filesystemWrite: false,
 				terminal: true,
+				webFetch: false,
 			};
 		case "restrictive":
 			return DEFAULT_POLICY;
@@ -194,6 +214,7 @@ function enabledPermissionLabels(resolved: ResolvedPermissionPolicy): string[] {
 		resolved.filesystemRead ? "filesystem read" : undefined,
 		resolved.filesystemWrite ? "filesystem write" : undefined,
 		resolved.terminal ? "terminal" : undefined,
+		resolved.webFetch ? "web fetch" : undefined,
 		// oxlint-disable-next-line unicorn/prefer-native-coercion-functions -- type guard preserves string[] return type
 	].filter((label): label is string => Boolean(label));
 }
@@ -209,6 +230,8 @@ function capabilityEnabled(
 			return resolved.filesystemWrite;
 		case "terminal":
 			return resolved.terminal;
+		case "webFetch":
+			return resolved.webFetch;
 	}
 }
 
@@ -220,5 +243,7 @@ function permissionLabel(capability: PermissionCapability): string {
 			return "filesystem writes";
 		case "terminal":
 			return "terminal execution";
+		case "webFetch":
+			return "web fetches";
 	}
 }

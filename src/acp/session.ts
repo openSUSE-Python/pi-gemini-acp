@@ -5,6 +5,7 @@ import path from "node:path";
 import { resolveGeminiAcpCommand, spawnCommandForGeminiAcpResolution } from "../config/command.ts";
 import { resolveGitIdentityEnv } from "../config/git-identity.ts";
 import {
+	type PermissionCapability,
 	permissionPolicyCapabilities,
 	requirePermissionCapability,
 } from "../config/permission-policy.ts";
@@ -587,9 +588,7 @@ export function permissionOptionId(
 	return coerceString(asRecord(option)?.optionId);
 }
 
-function permissionCapabilityForRequest(
-	params: unknown,
-): "filesystemRead" | "filesystemWrite" | "terminal" | undefined {
+function permissionCapabilityForRequest(params: unknown): PermissionCapability | undefined {
 	const toolCall = asRecord(asRecord(params)?.toolCall);
 	// ACP kind is authoritative. Never classify from command arguments or diff contents.
 	switch (toolCall?.kind) {
@@ -601,6 +600,8 @@ function permissionCapabilityForRequest(
 			return "filesystemWrite";
 		case "read":
 			return "filesystemRead";
+		case "fetch":
+			return "webFetch";
 		case undefined:
 			break;
 		default:
@@ -610,6 +611,9 @@ function permissionCapabilityForRequest(
 	const text = (coerceString(toolCall?.name) ?? "").replaceAll("_", " ").toLowerCase();
 	if (/(^|[^a-z])(terminal|shell|command|execute|exec)([^a-z]|$)/u.test(text)) {
 		return "terminal";
+	}
+	if (/(^|[^a-z])(fetch|url)([^a-z]|$)/u.test(text)) {
+		return "webFetch";
 	}
 	if (/(^|[^a-z])(write|modify|delete|create|overwrite|edit)([^a-z]|$)/u.test(text)) {
 		return "filesystemWrite";

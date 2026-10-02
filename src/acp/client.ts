@@ -1,6 +1,7 @@
 /** @file Narrow Gemini ACP client contracts, one-shot process helpers, and response normalization. */
 import { homedir } from "node:os";
 
+import type { PermissionCapability } from "../config/permission-policy.ts";
 import type {
 	GeminiAcpPermissionPolicy,
 	SearchProviderMetadata,
@@ -103,7 +104,7 @@ export type GeminiAcpPromptActivity =
 			type: "permission";
 			kind?: AcpToolKind;
 			title?: string;
-			capability?: "filesystemRead" | "filesystemWrite" | "terminal";
+			capability?: PermissionCapability;
 			outcome: "selected" | "cancelled";
 	  };
 

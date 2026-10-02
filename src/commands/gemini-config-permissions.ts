@@ -65,7 +65,7 @@ export async function runGeminiConfigPermissions(
 			providerError(
 				"GEMINI_ACP_PERMISSION_CONFIRMATION_REQUIRED",
 				"permission_policy",
-				"Enabling filesystem write or terminal execution requires confirmRisk: true. These capabilities allow the ACP to modify files or run shell commands.",
+				"Enabling filesystem write, terminal execution or web fetch requires confirmRisk: true. These capabilities allow the ACP to modify files, run shell commands or retrieve URLs chosen by the model.",
 			),
 		);
 	}
@@ -75,6 +75,7 @@ export async function runGeminiConfigPermissions(
 			filesystemRead: currentResolved.filesystemRead,
 			filesystemWrite: currentResolved.filesystemWrite,
 			terminal: currentResolved.terminal,
+			webFetch: currentResolved.webFetch,
 			[toggle.capability]: nextEnabled,
 		},
 		toggle.reason ?? currentResolved.reason,
@@ -207,6 +208,7 @@ function formatCurrentSummary(resolved: ResolvedPermissionPolicy): string {
 		resolved.filesystemRead ? "filesystem read" : undefined,
 		resolved.filesystemWrite ? "filesystem write" : undefined,
 		resolved.terminal ? "terminal" : undefined,
+		resolved.webFetch ? "web fetch" : undefined,
 	].filter(Boolean);
 	if (allowed.length === 0) return "restrictive (no capabilities enabled)";
 	return `${resolved.mode} (${allowed.join(", ")})`;
@@ -238,6 +240,15 @@ function capabilitySettings(resolved: ResolvedPermissionPolicy): PermissionCapab
 			enabled: resolved.terminal,
 			requiresConfirmation: true,
 		},
+		{
+			capability: "webFetch",
+			label: "Web fetch",
+			description:
+				"Allow Gemini ACP to retrieve URLs it chooses with its web_fetch tool. A fetched URL can carry data out, and fetched pages can contain prompt injection.",
+			requiredFor: "reading web pages and documentation beyond search results",
+			enabled: resolved.webFetch,
+			requiresConfirmation: true,
+		},
 	];
 }
 
@@ -252,6 +263,8 @@ function capabilityEnabled(
 			return resolved.filesystemWrite;
 		case "terminal":
 			return resolved.terminal;
+		case "webFetch":
+			return resolved.webFetch;
 	}
 }
 
@@ -263,6 +276,6 @@ function requiresConfirmation(
 	return (
 		enabled &&
 		confirmRisk !== true &&
-		(capability === "filesystemWrite" || capability === "terminal")
+		(capability === "filesystemWrite" || capability === "terminal" || capability === "webFetch")
 	);
 }

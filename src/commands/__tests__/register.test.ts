@@ -416,6 +416,26 @@ describe("Gemini ACP command registration", () => {
 		expect(config.providers?.["gemini-acp"]?.permissionPolicy).toBeUndefined();
 	});
 
+	it("requires confirmation for webFetch and stores it as its own capability", async () => {
+		const unconfirmed = await runGeminiConfig(
+			{ action: "permissions", capability: "webFetch", enabled: true },
+			{ rootDir },
+		);
+		expect((unconfirmed.details as ResultEnvelope).error?.code).toBe(
+			"GEMINI_ACP_PERMISSION_CONFIRMATION_REQUIRED",
+		);
+		const result = await runGeminiConfig(
+			{ action: "permissions", capability: "webFetch", enabled: true, confirmRisk: true },
+			{ rootDir },
+		);
+		const config = await loadConfig({ rootDir });
+		expect(result.content[0]?.text).toContain("- [x] Web fetch");
+		expect(config.providers?.["gemini-acp"]?.permissionPolicy).toMatchObject({
+			webFetch: true,
+			filesystemWrite: false,
+		});
+	});
+
 	it("toggles filesystemWrite with risk confirmation", async () => {
 		const result = await runGeminiConfig(
 			{
