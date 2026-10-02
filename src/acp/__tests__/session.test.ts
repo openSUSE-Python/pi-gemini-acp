@@ -27,6 +27,14 @@ rl.on('line', line => {
     const text = msg.params.prompt[0].text;
     if (text === 'stall') return;
     const update = u => send({ method: 'session/update', params: { sessionId: 'private-session-id', update: u } });
+    if (text === 'approved-tool' || text === 'approved-tool-stall') {
+      // Like Gemini CLI: a call that needs permission gets no tool_call, only the request.
+      send({ method: 'session/request_permission', id: text, params: {
+        sessionId: 'private-session-id', toolCall: { toolCallId: 'p', kind: 'execute', title: 'make' },
+        options: [{ kind: 'allow_once', optionId: 'proceed_once' }]
+      } });
+      return;
+    }
     if (text === 'tool-stall') {
       update({ sessionUpdate: 'tool_call', toolCallId: 't', status: 'in_progress', kind: 'execute' });
       return;
@@ -49,6 +57,13 @@ rl.on('line', line => {
       sessionId: 'private-session-id', toolCall: { kind: 'edit', title: 'SECRET_PATH', content: [{ newText: 'SECRET_DIFF shell' }] },
       options: [{ kind: 'allow_once', optionId: 'proceed_once' }]
     } });
+  } else if (msg.id === 'approved-tool') {
+    setTimeout(() => {
+      send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
+        sessionUpdate: 'tool_call_update', toolCallId: 'p', status: 'completed', kind: 'execute'
+      } } });
+      send({ id: promptId, result: { stopReason: 'end_turn' } });
+    }, 30);
   } else if (msg.id === 'permission') {
     if (msg.result.outcome.optionId !== 'proceed_once') {
       send({ id: promptId, error: { code: -32603, message: 'permission incorrectly denied' } });
@@ -241,6 +256,37 @@ describe("ACP session protocol and diagnostics", () => {
 		vi.stubEnv("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", "150");
 		const { session: active, id } = await start();
 		const error = await active.prompt(id, "tool-stall").catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(JsonRpcTimeoutError);
+		expect(error).not.toBeInstanceOf(GeminiAcpIdleTimeoutError);
+	});
+
+	it("treats an approved permission request as the start of its tool call", async () => {
+		const file = path.join(dir, "trace.jsonl");
+		vi.stubEnv("PI_GEMINI_ACP_TRACE_FILE", file);
+		const { session: active, id } = await start();
+		const activity: unknown[] = [];
+		await active.prompt(id, "approved-tool", undefined, {
+			onActivity: (item) => activity.push(item),
+		});
+		expect(activity).toEqual([
+			expect.objectContaining({ type: "permission", outcome: "selected" }),
+			{ type: "tool", toolCallId: "p", kind: "execute", status: "in_progress", title: "make" },
+			expect.objectContaining({ type: "tool", toolCallId: "p", status: "completed" }),
+		]);
+		const records = (await readFile(file, "utf8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const toolEnd = records.find((record) => record.event === "tool.end");
+		// The peer completes the call 30 ms after the approval; timers may fire a little early.
+		expect(toolEnd?.durationMs).toBeGreaterThanOrEqual(20);
+	});
+
+	it("does not treat an approved, still running tool call as a stall", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "20");
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", "150");
+		const { session: active, id } = await start();
+		const error = await active.prompt(id, "approved-tool-stall").catch((caught: unknown) => caught);
 		expect(error).toBeInstanceOf(JsonRpcTimeoutError);
 		expect(error).not.toBeInstanceOf(GeminiAcpIdleTimeoutError);
 	});

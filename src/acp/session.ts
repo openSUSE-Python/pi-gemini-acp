@@ -358,6 +358,21 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				capability,
 				outcome: optionId ? "selected" : "cancelled",
 			});
+			const toolCallId = coerceString(toolCall?.toolCallId);
+			if (state && optionId && toolCallId) {
+				// Gemini CLI sends no tool_call for a call that needs permission: the request is the
+				// first Pi hears of it, and the call runs as soon as it is approved.
+				const started = { ...toolCall, toolCallId, status: "in_progress" };
+				trackRunningTool(state.runningTools, started);
+				this.trackToolTiming(state.stats, started);
+				this.emitActivity(state, {
+					type: "tool",
+					toolCallId,
+					kind,
+					status: "in_progress",
+					title: coerceString(toolCall?.title),
+				});
+			}
 			return {
 				outcome: optionId ? { outcome: "selected", optionId } : { outcome: "cancelled" },
 			};
