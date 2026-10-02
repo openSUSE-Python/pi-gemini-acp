@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import type { Context, Model } from "@earendil-works/pi-ai";
+import { normalizeContext, type Context, type Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GeminiAcpClient, GeminiAcpCommandSettings } from "../../acp/client.ts";
@@ -197,6 +197,35 @@ describe("createGeminiAcpStreamSimple", () => {
 		expect(
 			(events.at(-1) as { message: { content: { text: string }[] } }).message.content[0].text,
 		).toContain("Assistant: Hi");
+	});
+
+	it("reads the system prompt from a normalized Pi transcript and skips system messages", async () => {
+		const prompt = vi.fn(async () => "ok");
+		const client = { prompt, search: vi.fn() } as unknown as GeminiAcpClient;
+		const transcript = normalizeContext({
+			systemPrompt: "Pi system prompt",
+			tools: [{ name: "read", description: "Read a file", parameters: { type: "object" } }],
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		} as unknown as Context);
+		// A later system message, as Pi sends when the system prompt or tool set changes.
+		transcript.messages.push({
+			role: "system",
+			content: "",
+			sections: { extra: "Extra section" },
+			timestamp: 2,
+		} as unknown as Context["messages"][0]);
+		await makeStream(client, {
+			appendSystemPrompt: false,
+			appendAgents: false,
+			appendTools: false,
+		})(fakeModel(), transcript as unknown as Context).result();
+		const request = (
+			prompt.mock.calls as unknown as Array<[{ parts: Array<{ text: string }> }]>
+		)[0][0];
+		expect(request.parts.map((p) => p.text)).toEqual([
+			"Pi system prompt\n\nExtra section",
+			"User: hello",
+		]);
 	});
 
 	it("keeps only the current message when maxHistoryMessages is zero", async () => {

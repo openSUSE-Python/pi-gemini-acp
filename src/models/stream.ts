@@ -7,7 +7,6 @@ import {
 	type Api,
 	type AssistantMessage,
 	type Context,
-	type Message,
 	type Model,
 	type TextContent,
 } from "@earendil-works/pi-ai";
@@ -27,6 +26,11 @@ import type {
 	GeminiAcpProviderSettings,
 } from "../types.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
+import {
+	conversationMessages,
+	currentSystemPrompt,
+	type ConversationMessage,
+} from "./transcript.ts";
 import type { GeminiAcpStreamSimple } from "./types.ts";
 
 // Pi's Api type is KnownApi | (string & {}); it accepts any string routing key.
@@ -40,15 +44,15 @@ function buildAcpPromptRequest(
 	maxHistoryMessages?: number,
 ): { parts: GeminiAcpPromptPart[] } {
 	const parts: GeminiAcpPromptPart[] = [];
-	if (preamble) {
-		parts.push({ type: "text", text: preamble });
-	} else if (context.systemPrompt) {
-		parts.push({ type: "text", text: context.systemPrompt });
-	}
+	// An empty preamble (every section disabled) falls back to Pi's own system prompt.
+	const systemPrompt =
+		preamble !== undefined && preamble.length > 0 ? preamble : currentSystemPrompt(context);
+	if (systemPrompt) parts.push({ type: "text", text: systemPrompt });
+	const conversation = conversationMessages(context);
 	const messages =
 		maxHistoryMessages !== undefined && maxHistoryMessages >= 0
-			? context.messages.slice(-Math.max(1, Math.floor(maxHistoryMessages)))
-			: context.messages;
+			? conversation.slice(-Math.max(1, Math.floor(maxHistoryMessages)))
+			: conversation;
 	for (const msg of messages) {
 		const text = messageToText(msg);
 		if (text) parts.push({ type: "text", text });
@@ -57,7 +61,7 @@ function buildAcpPromptRequest(
 }
 
 /** Flattens one Pi Message into a text fragment for the ACP prompt. */
-function messageToText(msg: Message): string | undefined {
+function messageToText(msg: ConversationMessage): string | undefined {
 	if (msg.role === "user") {
 		const text = typeof msg.content === "string" ? msg.content : extractText(msg.content);
 		return `User: ${text}`;
@@ -174,7 +178,7 @@ export function createGeminiAcpStreamSimple(
 				const preamble = await buildPreamble({
 					modelId: model.id,
 					cwd: resolveCwd(options),
-					upstreamSystemPrompt: context.systemPrompt,
+					upstreamSystemPrompt: currentSystemPrompt(context),
 				});
 
 				const request = {
