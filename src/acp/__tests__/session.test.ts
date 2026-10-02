@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { JsonRpcTimeoutError } from "../jsonrpc-stdio.ts";
-import { AcpProcessSession } from "../session.ts";
+import { AcpProcessSession, GeminiAcpIdleTimeoutError, promptIdleTimeoutMs } from "../session.ts";
 import { acpTimeoutMs, traceAcp } from "../trace.ts";
 
 // A local protocol peer, not Gemini: no credentials, network requests, or project tools.
@@ -23,7 +23,24 @@ rl.on('line', line => {
     send({ id: msg.id, result: { sessionId: 'private-session-id' } });
   } else if (msg.method === 'session/prompt') {
     promptId = msg.id;
-    if (msg.params.prompt[0].text === 'stall') return;
+    const text = msg.params.prompt[0].text;
+    if (text === 'stall') return;
+    const update = u => send({ method: 'session/update', params: { sessionId: 'private-session-id', update: u } });
+    if (text === 'tool-stall') {
+      update({ sessionUpdate: 'tool_call', toolCallId: 't', status: 'in_progress', kind: 'execute' });
+      return;
+    }
+    if (text === 'slow') {
+      let n = 0;
+      const timer = setInterval(() => {
+        update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '.' } });
+        if (++n === 6) {
+          clearInterval(timer);
+          send({ id: promptId, result: { stopReason: 'end_turn' } });
+        }
+      }, 20);
+      return;
+    }
     send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
       sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'SECRET_THOUGHT' }
     } } });
@@ -165,6 +182,35 @@ describe("ACP session protocol and diagnostics", () => {
 		const { session: active, id } = await start();
 		await expect(active.prompt(id, "stall")).rejects.toBeInstanceOf(JsonRpcTimeoutError);
 		await expect(active.newSession(dir)).rejects.toBeInstanceOf(JsonRpcTimeoutError);
+	});
+
+	it("cancels a prompt that stops sending progress", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "40");
+		const { session: active, id } = await start();
+		await expect(active.prompt(id, "stall")).rejects.toBeInstanceOf(GeminiAcpIdleTimeoutError);
+	});
+
+	it("keeps waiting while progress arrives", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "80");
+		const { session: active, id } = await start();
+		// Six updates 20 ms apart: 120 ms in total, longer than the idle limit.
+		await expect(active.prompt(id, "slow")).resolves.toBe("");
+	});
+
+	it("does not treat a running Gemini tool as a stall", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "20");
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", "150");
+		const { session: active, id } = await start();
+		const error = await active.prompt(id, "tool-stall").catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(JsonRpcTimeoutError);
+		expect(error).not.toBeInstanceOf(GeminiAcpIdleTimeoutError);
+	});
+
+	it("disables the stall limit with 0 and rejects invalid values", () => {
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "0");
+		expect(promptIdleTimeoutMs()).toBe(0);
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "-5");
+		expect(promptIdleTimeoutMs()).toBe(600_000);
 	});
 
 	it("bounds initialization when the peer never responds", async () => {

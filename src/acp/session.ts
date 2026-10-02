@@ -22,6 +22,7 @@ import type {
 import {
 	JsonRpcResponseError,
 	JsonRpcStdioClient,
+	JsonRpcTimeoutError,
 	type JsonRpcNotification,
 	type JsonRpcRequest,
 } from "./jsonrpc-stdio.ts";
@@ -33,6 +34,20 @@ import { acpTimeoutMs, traceAcp } from "./trace.ts";
  * and a timeout discards its answer, so this only guards against a peer that never responds.
  */
 export const DEFAULT_PROMPT_TIMEOUT_MS = 1_800_000;
+
+/**
+ * A prompt that sends no update for this long, while none of Gemini's own tool calls is running, is
+ * treated as stalled. Thought and tool updates arrive every few seconds while Gemini works, and
+ * long tool runs (builds, tests) do not count.
+ */
+export const DEFAULT_PROMPT_IDLE_TIMEOUT_MS = 600_000;
+const PROMPT_IDLE_TIMEOUT_ENV = "PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS";
+
+/**
+ * A prompt was cancelled because Gemini stopped sending progress. Like other timeouts it is never
+ * replayed (Gemini may already have changed files) and the process is not reused.
+ */
+export class GeminiAcpIdleTimeoutError extends JsonRpcTimeoutError {}
 
 /** Controls cancellation behavior and observers for one in-flight ACP prompt turn. */
 export interface GeminiAcpPromptOptions extends GeminiAcpPromptObservers {
@@ -46,6 +61,10 @@ interface PromptState {
 	accumulatedText: string;
 	onUpdate?: GeminiAcpPromptUpdateHandler;
 	onActivity?: GeminiAcpPromptObservers["onActivity"];
+	/** Records progress for the stall detector. */
+	touch?: () => void;
+	/** Gemini tool calls that started and have not completed or failed yet. */
+	runningTools: Set<string>;
 }
 
 /** Normalized subset of ACP initialize capabilities used for feature preflight. */
@@ -186,7 +205,13 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			accumulatedText: "",
 			onUpdate,
 			onActivity: options.onActivity,
+			runningTools: new Set(),
 		};
+		const idle = new PromptIdleWatchdog(promptIdleTimeoutMs(), state.runningTools, () =>
+			traceAcp("prompt.idle_timeout", { connectionId: this.rpc.connectionId }),
+		);
+		state.touch = () => idle.touch();
+		const signal = options.signal ? AbortSignal.any([options.signal, idle.signal]) : idle.signal;
 		this.promptStates.set(sessionId, state);
 		traceAcp("prompt.size", {
 			connectionId: this.rpc.connectionId,
@@ -203,15 +228,20 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 					prompt: typeof prompt === "string" ? [{ type: "text", text: prompt }] : prompt,
 				},
 				{
-					signal: options.signal,
+					signal,
 					timeoutMs: acpTimeoutMs("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", DEFAULT_PROMPT_TIMEOUT_MS),
 					onAbort: () => this.rpc.notify("session/cancel", { sessionId }),
 					abortMode: options.returnTextOnAbort ? "resolve" : "reject",
 				},
 			);
+			if (idle.fired && !options.signal?.aborted) throw idle.error();
 			notifyObserver(() => options.onOutcome?.(promptOutcome(result)));
 			return state.accumulatedText.trim();
+		} catch (error) {
+			if (idle.fired && !options.signal?.aborted) throw idle.error();
+			throw error;
 		} finally {
+			idle.dispose();
 			this.promptStates.delete(sessionId);
 		}
 	}
@@ -233,7 +263,9 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				kind,
 				outcome: optionId ? "selected" : "cancelled",
 			});
-			this.emitActivity(this.promptStateForUpdate(asRecord(message.params), {}), {
+			const state = this.promptStateForUpdate(asRecord(message.params), {});
+			state?.touch?.();
+			this.emitActivity(state, {
 				type: "permission",
 				kind,
 				title: coerceString(toolCall?.title),
@@ -307,6 +339,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		if (!update) return;
 		const state = this.promptStateForUpdate(record, update);
 		if (!state) return;
+		state.touch?.();
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk": {
 				const text = textContent(update.content);
@@ -322,6 +355,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			}
 			case "tool_call":
 			case "tool_call_update":
+				trackRunningTool(state.runningTools, update);
 				this.emitActivity(state, {
 					type: "tool",
 					toolCallId: coerceString(update.toolCallId),
@@ -412,6 +446,68 @@ function permissionCapabilityForRequest(
 		return "filesystemRead";
 	}
 	return undefined;
+}
+
+/** Prompt idle limit in ms, or 0 when disabled with `PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS=0`. */
+export function promptIdleTimeoutMs(): number {
+	if (process.env[PROMPT_IDLE_TIMEOUT_ENV]?.trim() === "0") return 0;
+	return acpTimeoutMs(PROMPT_IDLE_TIMEOUT_ENV, DEFAULT_PROMPT_IDLE_TIMEOUT_MS);
+}
+
+/** Cancels a prompt that stops sending progress while none of Gemini's tools is running. */
+class PromptIdleWatchdog {
+	readonly signal: AbortSignal;
+	fired = false;
+	private readonly controller = new AbortController();
+	private readonly timeoutMs: number;
+	private readonly runningTools: ReadonlySet<string>;
+	private readonly onFire: () => void;
+	private timer?: ReturnType<typeof setTimeout>;
+
+	constructor(timeoutMs: number, runningTools: ReadonlySet<string>, onFire: () => void) {
+		this.timeoutMs = timeoutMs;
+		this.runningTools = runningTools;
+		this.onFire = onFire;
+		this.signal = this.controller.signal;
+		this.touch();
+	}
+
+	touch(): void {
+		if (this.timeoutMs <= 0 || this.fired) return;
+		if (this.timer) clearTimeout(this.timer);
+		this.timer = setTimeout(() => {
+			// A running tool (build, test suite) may legitimately stay silent; the total deadline
+			// still bounds it.
+			if (this.runningTools.size > 0) {
+				this.touch();
+				return;
+			}
+			this.fired = true;
+			this.onFire();
+			this.controller.abort();
+		}, this.timeoutMs);
+		this.timer.unref();
+	}
+
+	error(): GeminiAcpIdleTimeoutError {
+		const minutes = Math.round((this.timeoutMs / 60_000) * 10) / 10;
+		return new GeminiAcpIdleTimeoutError(
+			`Gemini ACP sent no progress for ${minutes} min while no Gemini tool was running, so the turn was cancelled. Check the working tree before retrying. Set ${PROMPT_IDLE_TIMEOUT_ENV} to change this limit (0 disables it).`,
+		);
+	}
+
+	dispose(): void {
+		if (this.timer) clearTimeout(this.timer);
+	}
+}
+
+function trackRunningTool(runningTools: Set<string>, update: Record<string, unknown>): void {
+	const id = coerceString(update.toolCallId);
+	if (!id) return;
+	const status = coerceString(update.status);
+	if (status === "completed" || status === "failed") runningTools.delete(id);
+	// A new tool_call without a status is pending, per ACP.
+	else if (status !== undefined || update.sessionUpdate === "tool_call") runningTools.add(id);
 }
 
 /** Observers must not destabilize the ACP session. */
