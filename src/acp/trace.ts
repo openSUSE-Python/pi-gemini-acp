@@ -15,6 +15,8 @@ export interface TraceFields {
 	update?: string;
 	/** ACP tool kind of a permission request. */
 	kind?: string;
+	/** Gemini CLI approval mode (default, autoEdit, yolo, plan, or "other"). */
+	mode?: "default" | "autoEdit" | "yolo" | "plan" | "other";
 }
 
 const METHODS = new Set([

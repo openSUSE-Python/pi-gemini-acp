@@ -117,7 +117,7 @@ The interactive picker includes a Search tool section. Search is enabled by defa
 ### Safety notes
 
 - Use Gemini CLI local auth; do not pass API keys to `/gemini-config command`.
-- `permissions` controls the answers to Gemini's ACP permission requests, not a filesystem or shell sandbox. Gemini CLI approval settings can allow operations without asking this extension.
+- `permissions` controls the answers to Gemini's ACP permission requests, not a filesystem or shell sandbox. Gemini CLI approval settings can allow operations without asking this extension: when a chat session runs in Gemini's `autoEdit` or `yolo` approval mode, the chat shows a warning that the policy is not applied.
 - The client does not advertise filesystem-write or terminal services. Gemini executes writes and commands locally using its own tools; this avoids routing writes to an unimplemented `fs/write_text_file` handler.
 - Filesystem write and terminal access require `confirmRisk=true`.
 - Use `/gemini-config trust` only when Gemini CLI requires workspace trust.

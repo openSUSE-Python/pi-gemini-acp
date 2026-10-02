@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -20,7 +20,8 @@ rl.on('line', line => {
       send({ id: msg.id, error: { code: -32603, message: 'unsupported capabilities advertised' } });
     } else send({ id: msg.id, result: {} });
   } else if (msg.method === 'session/new') {
-    send({ id: msg.id, result: { sessionId: 'private-session-id' } });
+    const modes = msg.params.cwd.endsWith('yolo') ? { currentModeId: 'yolo', availableModes: [] } : undefined;
+    send({ id: msg.id, result: { sessionId: 'private-session-id', modes } });
   } else if (msg.method === 'session/prompt') {
     promptId = msg.id;
     const text = msg.params.prompt[0].text;
@@ -168,6 +169,23 @@ describe("ACP session protocol and diagnostics", () => {
 				},
 			},
 		]);
+	});
+
+	it("reports a permissive Gemini approval mode once per session", async () => {
+		const file = path.join(dir, "trace.jsonl");
+		vi.stubEnv("PI_GEMINI_ACP_TRACE_FILE", file);
+		const yoloDir = path.join(dir, "yolo");
+		await mkdir(yoloDir);
+		session = await AcpProcessSession.start({ command: process.execPath, args: ["-e", peer] });
+		await session.initialize();
+		const id = await session.newSession(yoloDir);
+		const activity: Array<{ type: string }> = [];
+		await session.prompt(id, "slow", undefined, { onActivity: (item) => activity.push(item) });
+		await session.prompt(id, "slow", undefined, { onActivity: (item) => activity.push(item) });
+		expect(activity.filter((item) => item.type === "approval_mode")).toEqual([
+			{ type: "approval_mode", mode: "yolo" },
+		]);
+		expect(await readFile(file, "utf8")).toContain('"event":"session.mode"');
 	});
 
 	it.skipIf(process.platform === "win32")("creates private trace files", async () => {
