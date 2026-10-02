@@ -65,7 +65,7 @@ describe("buildPiPreamble", () => {
 		expect(result).not.toMatch(/Gemini CLI tools|exclusively/u);
 		expect(result).toContain("Do not narrate or announce actions beforehand");
 		expect(result).not.toContain("AGENTS.md");
-		expect(result).not.toContain("Available tools");
+		expect(result).not.toContain("Pi tools");
 	});
 
 	it("upstreamSystemPrompt appears between Pi-header and AGENTS.md", async () => {
@@ -108,7 +108,8 @@ describe("buildPiPreamble", () => {
 		const result = await buildPiPreamble(
 			opts({ appendSystemPrompt: false, appendAgents: false, pi }),
 		);
-		expect(result).toContain("## Available tools");
+		expect(result).toContain("## Pi tools");
+		expect(result).toContain("You cannot call them in this session");
 		expect(result).toContain("- read");
 		expect(result).toContain("- write");
 		expect(result).toContain("- bash");
@@ -122,14 +123,14 @@ describe("buildPiPreamble", () => {
 		const result = await buildPiPreamble(
 			opts({ appendSystemPrompt: false, appendAgents: false, pi }),
 		);
-		expect(result).toContain("## Available tools");
+		expect(result).toContain("## Pi tools");
 		expect(result).toContain("- search");
 		expect(result).toContain("- gemini_status");
 	});
 
 	it("appendTools with no skills — section absent", async () => {
 		const result = await buildPiPreamble(opts({ appendSystemPrompt: false, appendAgents: false }));
-		expect(result).not.toContain("Available tools");
+		expect(result).not.toContain("Pi tools");
 	});
 });
 

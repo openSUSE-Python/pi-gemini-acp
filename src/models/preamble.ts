@@ -115,7 +115,17 @@ export function createPreambleBuilder(
 				toolsListResolved = true;
 			}
 			if (toolsList) {
-				lines.push("## Available tools", "", toolsList, "");
+				// Pi's own instructions name these tools, but this chat provider cannot relay tool
+				// calls to Pi. Listing them as "available" made Gemini try to call them.
+				lines.push(
+					"## Pi tools",
+					"",
+					"Pi's instructions may refer to these Pi tools:",
+					toolsList,
+					"",
+					"You cannot call them in this session. Use your own tools for the same purpose.",
+					"",
+				);
 			}
 		}
 
