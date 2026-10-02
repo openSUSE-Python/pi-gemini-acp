@@ -33,6 +33,7 @@ import { buildConversation } from "./conversation.ts";
 import { fitHistory, maxHistoryChars } from "./history-budget.ts";
 import { AssistantMessageBuilder } from "./message-builder.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
+import { createToolActivityLog } from "./tool-activity.ts";
 import { conversationMessages, currentSystemPrompt, messageToText } from "./transcript.ts";
 import type { GeminiAcpStreamSimple } from "./types.ts";
 
@@ -197,6 +198,7 @@ export function createGeminiAcpStreamSimple(
 		const partial = createPartialMessage(model);
 		stream.push({ type: "start", partial });
 		const message = new AssistantMessageBuilder(stream, partial);
+		const toolLog = createToolActivityLog();
 
 		void (async () => {
 			try {
@@ -223,7 +225,7 @@ export function createGeminiAcpStreamSimple(
 				};
 				let outcome: GeminiAcpPromptOutcome = {};
 				const observers = {
-					onActivity: createActivityRenderer(message),
+					onActivity: createActivityRenderer(message, toolLog),
 					onOutcome: (reported: GeminiAcpPromptOutcome) => {
 						outcome = reported;
 					},
@@ -246,6 +248,7 @@ export function createGeminiAcpStreamSimple(
 				);
 				// Clients that return the answer without streaming it still produce a text block.
 				if (!message.text() && result) message.appendText(result);
+				toolLog?.finish();
 
 				const stop = piStopReason(outcome.stopReason);
 				if (stop.errorMessage) throw new Error(stop.errorMessage);
@@ -262,6 +265,7 @@ export function createGeminiAcpStreamSimple(
 				stream.push({ type: "done", reason: stop.reason, message: final });
 				stream.end();
 			} catch (cause) {
+				toolLog?.finish();
 				const errorMessage = cause instanceof Error ? cause.message : String(cause);
 				const aborted = options?.signal?.aborted ?? false;
 				const final: AssistantMessage = {

@@ -14,6 +14,7 @@ import { getGeminiAcpStatus } from "../config/status.ts";
 import type { GeminiAcpConfig, GeminiAcpProviderSettings } from "../types.ts";
 import type { PiToolsSource } from "./preamble.ts";
 import { createGeminiAcpStreamSimple, promptSettingsForModel } from "./stream.ts";
+import { installToolActivityHost, type ToolActivityApi } from "./tool-activity.ts";
 import type { GeminiAcpProviderConfig, ModelProviderRegistrar } from "./types.ts";
 
 // Pi's Api type is KnownApi | (string & {}); it accepts any string routing key.
@@ -104,6 +105,7 @@ export async function registerGeminiAcpModelProvider(
 	const config = await buildGeminiAcpProviderConfig(pi, rootDir, loadedConfig);
 	if (config) {
 		pi.registerProvider("gemini-acp", config);
+		installToolActivityHost(pi as ToolActivityApi);
 		// Best-effort prewarm of a prompt session for the current working directory so the
 		// first chat turn does not pay the cold-session/new penalty.
 		const settings = loadedConfig.providers?.["gemini-acp"];

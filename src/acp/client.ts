@@ -91,6 +91,8 @@ export type GeminiAcpPromptActivity =
 			/** ACP status: pending, in_progress, completed or failed. */
 			status?: string;
 			title?: string;
+			/** Text Gemini attached to the call: a description while it runs, its output when done. */
+			output?: string;
 	  }
 	| {
 			/** Gemini CLI does not ask for permission in this mode, so Pi's policy is bypassed. */

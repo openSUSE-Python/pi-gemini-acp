@@ -486,6 +486,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 					kind: acpToolKind(update.kind),
 					status: coerceString(update.status),
 					title: coerceString(update.title),
+					output: toolContentText(update.content),
 				});
 				return;
 			default:
@@ -673,6 +674,26 @@ function notifyObserver(callback: () => void): void {
 function textContent(value: unknown): string | undefined {
 	const content = asRecord(value);
 	return content?.type === "text" && typeof content.text === "string" ? content.text : undefined;
+}
+
+/**
+ * Joins the text of an ACP tool call's `content` list. Text blocks are kept verbatim; a diff block
+ * becomes a line naming the file it changes. Terminal blocks carry no text and are skipped.
+ */
+function toolContentText(value: unknown): string | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const parts: string[] = [];
+	for (const item of value) {
+		const block = asRecord(item);
+		if (block?.type === "content") {
+			const text = textContent(block.content);
+			if (text !== undefined) parts.push(text);
+		} else if (block?.type === "diff") {
+			const file = coerceString(block.path);
+			if (file) parts.push(`Changed ${file}`);
+		}
+	}
+	return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 /** Reads Gemini CLI's `session/prompt` result: `stopReason` and `_meta.quota` token counts. */

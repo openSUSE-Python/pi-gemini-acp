@@ -94,7 +94,7 @@ describe("createGeminiAcpStreamSimple", () => {
 		expect(deltas[1].partial.content[0].text).toBe("Hello world!");
 	});
 
-	it("shows Gemini's thoughts, tool calls and policy denials as thinking", async () => {
+	it("shows tool calls and policy denials as thinking when Pi cannot show tool entries", async () => {
 		const client = {
 			prompt: vi.fn(async (_req, _signal, onUpdate, observers) => {
 				observers?.onActivity?.({ type: "thought", text: "Checking the tree." });
