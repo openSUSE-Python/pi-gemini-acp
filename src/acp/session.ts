@@ -27,7 +27,7 @@ import {
 	type JsonRpcRequest,
 } from "./jsonrpc-stdio.ts";
 import { acpToolKind } from "./tool-kind.ts";
-import { acpTimeoutMs, traceAcp } from "./trace.ts";
+import { acpTimeoutMs, traceAcp, type TraceFields } from "./trace.ts";
 
 /**
  * Total deadline for one ACP prompt. A turn can run many Gemini tool calls (edits, builds, tests),
@@ -65,6 +65,18 @@ interface PromptState {
 	touch?: () => void;
 	/** Gemini tool calls that started and have not completed or failed yet. */
 	runningTools: Set<string>;
+	/** Metadata-only counters for the `prompt.end` trace record. */
+	stats: PromptStats;
+}
+
+interface PromptStats {
+	startedAt: number;
+	/** Start time and kind of each tool call, by id; kept after completion to count calls once. */
+	tools: Map<string, { startedAt: number; kind?: string; ended: boolean }>;
+	permissions: number;
+	thoughtChunks: number;
+	firstTextAt?: number;
+	longestToolMs: number;
 }
 
 /** Normalized subset of ACP initialize capabilities used for feature preflight. */
@@ -213,6 +225,13 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			onUpdate,
 			onActivity: options.onActivity,
 			runningTools: new Set(),
+			stats: {
+				startedAt: performance.now(),
+				tools: new Map(),
+				permissions: 0,
+				thoughtChunks: 0,
+				longestToolMs: 0,
+			},
 		};
 		const idle = new PromptIdleWatchdog(promptIdleTimeoutMs(), state.runningTools, () =>
 			traceAcp("prompt.idle_timeout", { connectionId: this.rpc.connectionId }),
@@ -228,6 +247,8 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 					? prompt.length
 					: prompt.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : 0), 0),
 		});
+		let outcome: "ok" | "error" | "aborted" | "timeout" = "error";
+		let stopReason: string | undefined;
 		try {
 			const result = await this.rpc.request(
 				"session/prompt",
@@ -243,15 +264,71 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				},
 			);
 			if (idle.fired && !options.signal?.aborted) throw idle.error();
-			notifyObserver(() => options.onOutcome?.(promptOutcome(result)));
+			const reported = promptOutcome(result);
+			stopReason = reported.stopReason;
+			outcome = signal.aborted ? "aborted" : "ok";
+			notifyObserver(() => options.onOutcome?.(reported));
 			return state.accumulatedText.trim();
 		} catch (error) {
+			outcome =
+				error instanceof JsonRpcTimeoutError || idle.fired
+					? "timeout"
+					: signal.aborted
+						? "aborted"
+						: "error";
 			if (idle.fired && !options.signal?.aborted) throw idle.error();
 			throw error;
 		} finally {
 			idle.dispose();
 			this.promptStates.delete(sessionId);
+			this.tracePromptEnd(state.stats, outcome, stopReason);
 		}
+	}
+
+	/** One summary record per turn: where the time went, without any payload. */
+	private tracePromptEnd(stats: PromptStats, outcome: TraceFields["outcome"], stopReason?: string) {
+		const now = performance.now();
+		for (const tool of stats.tools.values()) {
+			if (!tool.ended) {
+				stats.longestToolMs = Math.max(stats.longestToolMs, now - tool.startedAt);
+			}
+		}
+		traceAcp("prompt.end", {
+			connectionId: this.rpc.connectionId,
+			outcome,
+			stopReason,
+			durationMs: now - stats.startedAt,
+			firstTextMs:
+				stats.firstTextAt === undefined ? undefined : stats.firstTextAt - stats.startedAt,
+			toolCalls: stats.tools.size,
+			permissions: stats.permissions,
+			thoughtChunks: stats.thoughtChunks,
+			longestToolMs: stats.longestToolMs,
+		});
+	}
+
+	/** Times each Gemini tool call and traces its kind, final status and duration. */
+	private trackToolTiming(stats: PromptStats, update: Record<string, unknown>): void {
+		const id = coerceString(update.toolCallId);
+		if (!id) return;
+		const now = performance.now();
+		let tool = stats.tools.get(id);
+		if (!tool) {
+			tool = { startedAt: now, ended: false };
+			stats.tools.set(id, tool);
+		}
+		tool.kind ??= acpToolKind(update.kind);
+		const status = coerceString(update.status);
+		if (tool.ended || (status !== "completed" && status !== "failed")) return;
+		tool.ended = true;
+		const durationMs = now - tool.startedAt;
+		stats.longestToolMs = Math.max(stats.longestToolMs, durationMs);
+		traceAcp("tool.end", {
+			connectionId: this.rpc.connectionId,
+			kind: tool.kind,
+			status,
+			durationMs,
+		});
 	}
 
 	async close(): Promise<void> {
@@ -273,6 +350,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			});
 			const state = this.promptStateForUpdate(asRecord(message.params), {});
 			state?.touch?.();
+			if (state) state.stats.permissions += 1;
 			this.emitActivity(state, {
 				type: "permission",
 				kind,
@@ -340,9 +418,13 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 	private collectUpdate(params: unknown): void {
 		const record = asRecord(params);
 		const update = asRecord(record?.update);
+		const sessionUpdate = coerceString(update?.sessionUpdate) ?? "other";
+		const isTool = sessionUpdate === "tool_call" || sessionUpdate === "tool_call_update";
 		traceAcp("session.update", {
 			connectionId: this.rpc.connectionId,
-			update: coerceString(update?.sessionUpdate) ?? "other",
+			update: sessionUpdate,
+			kind: isTool ? acpToolKind(update?.kind) : undefined,
+			status: isTool ? coerceString(update?.status) : undefined,
 		});
 		if (!update) return;
 		const state = this.promptStateForUpdate(record, update);
@@ -352,12 +434,14 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			case "agent_message_chunk": {
 				const text = textContent(update.content);
 				if (text === undefined) return;
+				state.stats.firstTextAt ??= performance.now();
 				state.accumulatedText += text;
 				this.emitPromptUpdate(state, text);
 				return;
 			}
 			case "agent_thought_chunk": {
 				const text = textContent(update.content);
+				state.stats.thoughtChunks += 1;
 				if (text !== undefined) this.emitActivity(state, { type: "thought", text });
 				return;
 			}
@@ -372,6 +456,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			case "tool_call":
 			case "tool_call_update":
 				trackRunningTool(state.runningTools, update);
+				this.trackToolTiming(state.stats, update);
 				this.emitActivity(state, {
 					type: "tool",
 					toolCallId: coerceString(update.toolCallId),

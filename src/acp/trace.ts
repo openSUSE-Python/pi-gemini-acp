@@ -17,6 +17,34 @@ export interface TraceFields {
 	kind?: string;
 	/** Gemini CLI approval mode (default, autoEdit, yolo, plan, or "other"). */
 	mode?: "default" | "autoEdit" | "yolo" | "plan" | "other";
+	/** ACP tool call status (pending, in_progress, completed, failed, or "other"). */
+	status?: string;
+	/** ACP `session/prompt` stop reason (end_turn, max_tokens, ..., or "other"). */
+	stopReason?: string;
+	/** Number of Gemini tool calls in a prompt turn. */
+	toolCalls?: number;
+	/** Number of permission requests answered during a prompt turn. */
+	permissions?: number;
+	/** Number of thought chunks received during a prompt turn. */
+	thoughtChunks?: number;
+	/** Milliseconds from the prompt start to the first answer text (absent when none arrived). */
+	firstTextMs?: number;
+	/** Duration of the longest Gemini tool call in a prompt turn. */
+	longestToolMs?: number;
+}
+
+const STATUSES = new Set(["pending", "in_progress", "completed", "failed"]);
+const STOP_REASONS = new Set([
+	"end_turn",
+	"max_tokens",
+	"max_turn_requests",
+	"refusal",
+	"cancelled",
+]);
+
+function allowed(value: string | undefined, values: ReadonlySet<string>): string | undefined {
+	if (value === undefined) return undefined;
+	return values.has(value) ? value : "other";
 }
 
 const METHODS = new Set([
@@ -64,6 +92,8 @@ export function traceAcp(event: string, fields: TraceFields = {}): void {
 						: (ACP_TOOL_KINDS as readonly string[]).includes(fields.kind)
 							? fields.kind
 							: "other",
+				status: allowed(fields.status, STATUSES),
+				stopReason: allowed(fields.stopReason, STOP_REASONS),
 				update:
 					fields.update === undefined
 						? undefined

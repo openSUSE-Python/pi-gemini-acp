@@ -122,6 +122,27 @@ describe("ACP session protocol and diagnostics", () => {
 					outcome: "selected",
 				}),
 				expect.objectContaining({ event: "prompt.size", inputChars: 13 }),
+				expect.objectContaining({
+					event: "session.update",
+					update: "tool_call_update",
+					status: "completed",
+				}),
+				expect.objectContaining({
+					event: "tool.end",
+					kind: "edit",
+					status: "completed",
+					durationMs: expect.any(Number),
+				}),
+				expect.objectContaining({
+					event: "prompt.end",
+					outcome: "ok",
+					stopReason: "end_turn",
+					toolCalls: 1,
+					permissions: 1,
+					thoughtChunks: 1,
+					firstTextMs: expect.any(Number),
+					longestToolMs: expect.any(Number),
+				}),
 			]),
 		);
 		expect(new Set(records.map((record) => record.connectionId)).size).toBe(1);
@@ -245,7 +266,12 @@ describe("ACP session protocol and diagnostics", () => {
 		expect(() => traceAcp("test")).not.toThrow();
 		const file = path.join(dir, "trace.jsonl");
 		vi.stubEnv("PI_GEMINI_ACP_TRACE_FILE", file);
-		traceAcp("test", { method: "SECRET_METHOD", update: "SECRET_UPDATE" });
+		traceAcp("test", {
+			method: "SECRET_METHOD",
+			update: "SECRET_UPDATE",
+			status: "SECRET_STATUS",
+			stopReason: "SECRET_STOP",
+		});
 		expect(await readFile(file, "utf8")).not.toContain("SECRET");
 	});
 
