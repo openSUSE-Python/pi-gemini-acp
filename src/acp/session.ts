@@ -137,7 +137,9 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 		// GIT_CONFIG_* variables (and points GIT_CONFIG_GLOBAL at /dev/null), so
 		// in-sandbox `git commit` would otherwise fail with an unknown identity.
 		// The env is fixed at spawn and the process may serve several ACP
-		// sessions, so resolve it for Pi's working directory (process.cwd()).
+		// sessions. Chat processes get the identity of their working directory in
+		// settings.env (withGitIdentityForCwd), which wins below; others fall back
+		// to Pi's working directory (process.cwd()).
 		const gitIdentityEnv = resolveGitIdentityEnv();
 		const child = spawn(command.command, command.args, {
 			stdio: "pipe",

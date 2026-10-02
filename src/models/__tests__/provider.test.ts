@@ -75,7 +75,7 @@ describe("registerGeminiAcpModelProvider", () => {
 		expect(pi.registerProvider).toHaveBeenCalledTimes(1);
 		// Prewarm still uses primary account env (best-effort startup warm, not pool-aware).
 		const warmSettings = vi.mocked(warmCachedGeminiAcpPromptClient).mock.calls[0]?.[0];
-		expect(warmSettings?.env).toEqual({ GEMINI_CLI_HOME: "/tmp/gemini-primary" });
+		expect(warmSettings?.env).toMatchObject({ GEMINI_CLI_HOME: "/tmp/gemini-primary" });
 		expect(vi.mocked(getCachedGeminiAcpClient)).not.toHaveBeenCalled();
 	});
 

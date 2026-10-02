@@ -21,6 +21,7 @@ import type {
 	GeminiAcpPromptUpdateHandler,
 	GeminiAcpPromptUsage,
 } from "../acp/client.ts";
+import { withGitIdentityForCwd } from "../acp/settings.ts";
 import { estimateCostChars, estimateCostTokens } from "../tools/cost-estimate.ts";
 import type {
 	GeminiAcpChatSettings,
@@ -233,7 +234,8 @@ export function createGeminiAcpStreamSimple(
 				const result = await executeWithAccountPool(
 					config,
 					effectiveSettings,
-					async (commandSettings: GeminiAcpCommandSettings) => {
+					async (accountSettings: GeminiAcpCommandSettings) => {
+						const commandSettings = withGitIdentityForCwd(accountSettings, request.cwd);
 						const client: GeminiAcpClient = clientFactory
 							? clientFactory(commandSettings)
 							: getCachedGeminiAcpClient(commandSettings, "prompt");
