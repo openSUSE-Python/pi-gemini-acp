@@ -1,3 +1,4 @@
+import { resolveGitIdentityEnv } from "../config/git-identity.ts";
 import { isGeminiAutoModel } from "../config/model-auto.ts";
 import type { GeminiAcpProviderSettings } from "../types.ts";
 import type { GeminiAcpCommandSettings } from "./client.ts";
@@ -22,4 +23,19 @@ export function buildGeminiAcpCommandSettings(
 
 export function hasModelArg(args: readonly string[]): boolean {
 	return args.some((arg) => arg === "--model" || arg === "-m" || arg.startsWith("--model="));
+}
+
+/**
+ * Adds the git identity effective in `cwd` (repository-local and `includeIf` config apply) to the
+ * process environment of a Gemini ACP process that works there. The identity becomes part of the
+ * command settings, and therefore of the warm-process cache key: a process started for one identity
+ * is not reused in a repository with another. Account environment variables still win.
+ */
+export function withGitIdentityForCwd(
+	settings: GeminiAcpCommandSettings,
+	cwd: string,
+): GeminiAcpCommandSettings {
+	const identity = resolveGitIdentityEnv(process.env, cwd);
+	if (Object.keys(identity).length === 0) return settings;
+	return { ...settings, env: { ...identity, ...settings.env } };
 }

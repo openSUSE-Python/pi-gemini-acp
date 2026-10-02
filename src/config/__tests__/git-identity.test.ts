@@ -3,8 +3,10 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { clientCacheKey } from "../../acp/client-cache-key.ts";
+import { withGitIdentityForCwd } from "../../acp/settings.ts";
 import { resetGitIdentityCacheForTesting, resolveGitIdentityEnv } from "../git-identity.ts";
 
 describe("resolveGitIdentityEnv", () => {
@@ -130,6 +132,29 @@ describe("resolveGitIdentityEnv", () => {
 			expect(
 				resolveGitIdentityEnv({ GIT_AUTHOR_EMAIL: "env@example.com" }, repo).GIT_AUTHOR_EMAIL,
 			).toBe("env@example.com");
+		});
+
+		it("gives chat processes in repositories with different identities different cache keys", () => {
+			for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]) vi.stubEnv(key, undefined);
+			try {
+				const base = { command: "gemini", args: ["--acp"], env: { GEMINI_CLI_HOME: "/acct" } };
+				const work = withGitIdentityForCwd(base, path.join(root, "work"));
+				const personal = withGitIdentityForCwd(base, path.join(root, "personal"));
+				expect(work.env).toMatchObject({
+					GIT_AUTHOR_EMAIL: "work@example.com",
+					GEMINI_CLI_HOME: "/acct",
+				});
+				expect(personal.env?.GIT_AUTHOR_EMAIL).toBe("personal@example.com");
+				expect(clientCacheKey(work)).not.toBe(clientCacheKey(personal));
+				// Account environment variables win over the resolved identity.
+				const overridden = withGitIdentityForCwd(
+					{ ...base, env: { GIT_AUTHOR_EMAIL: "account@example.com" } },
+					path.join(root, "work"),
+				);
+				expect(overridden.env?.GIT_AUTHOR_EMAIL).toBe("account@example.com");
+			} finally {
+				vi.unstubAllEnvs();
+			}
 		});
 
 		it("honors repository-local identity", () => {

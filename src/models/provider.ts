@@ -6,7 +6,7 @@ import type { Api } from "@earendil-works/pi-ai";
 
 import { primaryAccountEnv } from "../acp/account-config.ts";
 import { warmCachedGeminiAcpPromptClient } from "../acp/client-cache.ts";
-import { buildGeminiAcpCommandSettings } from "../acp/settings.ts";
+import { buildGeminiAcpCommandSettings, withGitIdentityForCwd } from "../acp/settings.ts";
 import { isGeminiAutoModel } from "../config/model-auto.ts";
 import { GEMINI_MODEL_CHOICES } from "../config/model.ts";
 import { configFromEnv, loadConfig, withDefaultGeminiAcpConfig } from "../config/settings.ts";
@@ -113,9 +113,13 @@ export async function registerGeminiAcpModelProvider(
 		) {
 			const warm = (warmSettings: GeminiAcpProviderSettings, cwd: string) => {
 				void warmCachedGeminiAcpPromptClient(
-					buildGeminiAcpCommandSettings(
-						warmSettings,
-						primaryAccountEnv(loadedConfig.providers?.accounts),
+					// Same settings as a chat turn in `cwd` (see stream.ts), so the turn reuses it.
+					withGitIdentityForCwd(
+						buildGeminiAcpCommandSettings(
+							warmSettings,
+							primaryAccountEnv(loadedConfig.providers?.accounts),
+						),
+						cwd,
 					),
 					cwd,
 				).catch(() => {
