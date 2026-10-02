@@ -10,7 +10,7 @@ import {
 	defaultGeminiAcpIdleTtlMs,
 	GeminiAcpClientCache,
 } from "../client-cache.ts";
-import type { GeminiAcpCommandSettings } from "../client.ts";
+import type { GeminiAcpCommandSettings, GeminiAcpConversation } from "../client.ts";
 import { JsonRpcTransportError } from "../jsonrpc-stdio.ts";
 import type { GeminiAcpProcessSession, GeminiAcpPromptOptions } from "../session.ts";
 
@@ -334,6 +334,90 @@ describe("GeminiAcpClientCache", () => {
 		expect(factory.sessions[0]?.promptCalls).toBe(3);
 		expect(factory.sessions[0]?.closeCalls).toBe(0);
 		await cache.close();
+	});
+
+	describe("chat conversations", () => {
+		/** A turn whose history is `transcript`; the fake session answers `reply`. */
+		const turn = (transcript: string[], contextKey = "ctx") => {
+			const conversation: GeminiAcpConversation = {
+				contextKey,
+				transcript,
+				continuationParts: (from) =>
+					transcript.slice(from).map((text) => ({ type: "text" as const, text: `new:${text}` })),
+				replyFingerprint: () => "reply",
+			};
+			return {
+				parts: transcript.map((text) => ({ type: "text" as const, text: `full:${text}` })),
+				cwd: originalCwd,
+				conversation,
+			};
+		};
+
+		it("continues the session that holds the earlier messages and sends only new ones", async () => {
+			const factory = new FakeSessionFactory();
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			await client.prompt(turn(["u1", "reply", "u2", "reply", "tool", "u3"]));
+			const session = factory.sessions[0];
+			expect(session?.newSessionCalls).toBe(1);
+			expect(session?.promptSessionIds).toEqual(["session-1", "session-1", "session-1"]);
+			expect(session?.prompts).toEqual([
+				[{ type: "text", text: "full:u1" }],
+				[{ type: "text", text: "new:u2" }],
+				[
+					{ type: "text", text: "new:tool" },
+					{ type: "text", text: "new:u3" },
+				],
+			]);
+			await cache.close();
+		});
+
+		it("starts a fresh session after a branch switch or a context change", async () => {
+			const factory = new FakeSessionFactory();
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await client.prompt(turn(["other", "reply", "u2"]));
+			await client.prompt(turn(["other", "reply", "u2", "reply", "u3"], "new-context"));
+			expect(factory.sessions[0]?.promptSessionIds).toEqual([
+				"session-1",
+				"session-2",
+				"session-3",
+			]);
+			expect(factory.sessions[0]?.prompts[2]).toEqual([
+				{ type: "text", text: "full:other" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u2" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u3" },
+			]);
+			// The first conversation is still continuable from its own branch.
+			await client.prompt(turn(["u1", "reply", "u4"]));
+			expect(factory.sessions[0]?.promptSessionIds.at(-1)).toBe("session-1");
+			await cache.close();
+		});
+
+		it("does not continue a session whose turn failed", async () => {
+			const factory = new FakeSessionFactory({ failPromptAfterCount: 1 });
+			const cache = new GeminiAcpClientCache({ sessionFactory: factory.create });
+			const client = cache.get(settings("gemini"), "prompt");
+			await client.prompt(turn(["u1"]));
+			await expect(client.prompt(turn(["u1", "reply", "u2"]))).rejects.toThrow("planned failure");
+			await client.prompt(turn(["u1", "reply", "u2"]));
+			expect(factory.sessions[0]?.promptSessionIds).toEqual([
+				"session-1",
+				"session-1",
+				"session-2",
+			]);
+			expect(factory.sessions[0]?.prompts[2]).toEqual([
+				{ type: "text", text: "full:u1" },
+				{ type: "text", text: "full:reply" },
+				{ type: "text", text: "full:u2" },
+			]);
+			await cache.close();
+		});
 	});
 
 	it("passes prompt AbortSignal into fresh cached prompt sessions without closing the warm process", async () => {
@@ -664,6 +748,7 @@ class FakeSession implements GeminiAcpProcessSession {
 	readonly cwds: string[] = [];
 	readonly promptSignals: Array<AbortSignal | undefined> = [];
 	readonly promptSessionIds: Array<string | undefined> = [];
+	readonly prompts: unknown[] = [];
 	private activePrompts = 0;
 	private closePromptReject?: (error: Error) => void;
 
@@ -693,6 +778,7 @@ class FakeSession implements GeminiAcpProcessSession {
 		options?: GeminiAcpPromptOptions,
 	): Promise<string> {
 		this.promptSessionIds.push(_sessionId);
+		this.prompts.push(_prompt);
 		this.promptSignals.push(options?.signal);
 		this.promptCalls += 1;
 		if (this.factory.shouldFailPrompt()) throw new Error("planned failure");

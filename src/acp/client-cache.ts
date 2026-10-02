@@ -5,6 +5,7 @@ import { clientCacheKey } from "./client-cache-key.ts";
 import type {
 	GeminiAcpClient,
 	GeminiAcpCommandSettings,
+	GeminiAcpConversation,
 	GeminiAcpPromptObservers,
 	GeminiAcpPromptPart,
 	GeminiAcpPromptRequest,
@@ -37,6 +38,8 @@ const IDLE_TTL_ENV = "PI_GEMINI_ACP_IDLE_TTL_MS";
  */
 export const DEFAULT_MAX_PROMPT_SESSIONS = 25;
 const MAX_PROMPT_SESSIONS_ENV = "PI_GEMINI_ACP_MAX_PROMPT_SESSIONS";
+/** Continuable chat sessions remembered per process (e.g. several Pi sessions or branches). */
+const MAX_CONVERSATIONS = 8;
 
 type CacheRemovalListener = (key: string) => void;
 
@@ -50,6 +53,16 @@ interface ActiveProcess {
 	promptSessions: Map<string, Promise<string>>;
 	/** Prompt conversations consumed in this process; they are never closed on the Gemini side. */
 	promptSessionsUsed: number;
+	/** Chat sessions that can continue, most recent last. */
+	conversations: ConversationBinding[];
+}
+
+/** A Gemini session and the Pi conversation messages it holds, including its own last reply. */
+interface ConversationBinding {
+	sessionId: string;
+	cwd: string;
+	contextKey: string;
+	seen: readonly string[];
 }
 
 interface SearchSessionEntry {
@@ -247,17 +260,28 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		onUpdate?: GeminiAcpPromptUpdateHandler,
 		observers?: GeminiAcpPromptObservers,
 	): Promise<string> {
+		// Prompt workflows may depend on the caller/project cwd; only search uses
+		// the neutral cwd from searchSessionCwd() to avoid project discovery churn.
+		const cwd = request.cwd ?? process.cwd();
+		const conversation = "parts" in request ? request.conversation : undefined;
 		return await this.enqueue(
 			async () =>
-				// Prompt workflows may depend on the caller/project cwd; only search uses
-				// the neutral cwd from searchSessionCwd() to avoid project discovery churn.
-				await this.promptOnFreshSession(
-					request.cwd ?? process.cwd(),
-					requestToParts(request),
-					signal,
-					onUpdate,
-					observers,
-				),
+				conversation
+					? await this.promptConversation(
+							cwd,
+							requestToParts(request),
+							conversation,
+							signal,
+							onUpdate,
+							observers,
+						)
+					: await this.promptOnFreshSession(
+							cwd,
+							requestToParts(request),
+							signal,
+							onUpdate,
+							observers,
+						),
 			signal,
 		);
 	}
@@ -398,21 +422,73 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 		observers?: GeminiAcpPromptObservers,
 	): Promise<string> {
 		return await this.withWarmProcess(signal, async (active) => {
-			// Consume a prewarmed session once. Each request already contains Pi's full history;
-			// reusing a conversation would append that history repeatedly on the Gemini side.
-			const pendingSession = this.ensurePromptSession(active, cwd, signal);
-			active.promptSessions.delete(cwd);
-			active.promptSessionsUsed += 1;
-			if (
-				active.promptSessionsUsed >=
-				acpPositiveIntEnv(MAX_PROMPT_SESSIONS_ENV, DEFAULT_MAX_PROMPT_SESSIONS)
-			) {
-				// Restart the process once idle so abandoned conversations do not accumulate.
-				this.retireActiveWhenIdle = true;
-			}
-			const sessionId = await waitForAbort(pendingSession, signal);
+			// Each request already contains Pi's full history; reusing a conversation would
+			// append that history repeatedly on the Gemini side.
+			const sessionId = await waitForAbort(
+				this.claimFreshPromptSession(active, cwd, signal),
+				signal,
+			);
 			return await active.session.prompt(sessionId, parts, onUpdate, { ...observers, signal });
 		});
+	}
+
+	/**
+	 * Continues the session that holds the start of this conversation, sending only the new messages,
+	 * or starts a fresh one with the full history. A session whose turn failed or was aborted is not
+	 * continued: its state on the Gemini side is unknown.
+	 */
+	private async promptConversation(
+		cwd: string,
+		parts: GeminiAcpPromptPart[],
+		conversation: GeminiAcpConversation,
+		signal?: AbortSignal,
+		onUpdate?: GeminiAcpPromptUpdateHandler,
+		observers?: GeminiAcpPromptObservers,
+	): Promise<string> {
+		return await this.withWarmProcess(signal, async (active) => {
+			const binding = claimConversation(active, cwd, conversation);
+			const sessionId = binding
+				? binding.sessionId
+				: await waitForAbort(this.claimFreshPromptSession(active, cwd, signal), signal);
+			const promptParts = binding ? conversation.continuationParts(binding.seen.length) : parts;
+			traceAcp(binding ? "conversation.continue" : "conversation.new", {
+				inputChars: promptParts.reduce(
+					(sum, part) => sum + (part.type === "text" ? part.text.length : 0),
+					0,
+				),
+			});
+			const text = await active.session.prompt(sessionId, promptParts, onUpdate, {
+				...observers,
+				signal,
+			});
+			active.conversations.push({
+				sessionId,
+				cwd,
+				contextKey: conversation.contextKey,
+				seen: [...conversation.transcript, conversation.replyFingerprint(text)],
+			});
+			if (active.conversations.length > MAX_CONVERSATIONS) active.conversations.shift();
+			return text;
+		});
+	}
+
+	/** Takes the prewarmed prompt session for `cwd`, or creates one; each is used for one chat. */
+	private claimFreshPromptSession(
+		active: ActiveProcess,
+		cwd: string,
+		signal?: AbortSignal,
+	): Promise<string> {
+		const pendingSession = this.ensurePromptSession(active, cwd, signal);
+		active.promptSessions.delete(cwd);
+		active.promptSessionsUsed += 1;
+		if (
+			active.promptSessionsUsed >=
+			acpPositiveIntEnv(MAX_PROMPT_SESSIONS_ENV, DEFAULT_MAX_PROMPT_SESSIONS)
+		) {
+			// Restart the process once idle so abandoned conversations do not accumulate.
+			this.retireActiveWhenIdle = true;
+		}
+		return pendingSession;
 	}
 
 	private async ensurePromptSession(
@@ -497,6 +573,7 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 				searchSessions: new Map(),
 				promptSessions: new Map(),
 				promptSessionsUsed: 0,
+				conversations: [],
 			};
 		} catch (error) {
 			await session.close();
@@ -555,6 +632,29 @@ class CachedGeminiAcpClient implements GeminiAcpClient {
 			/* Failed starts are already invalidated; callers get the original error. */
 		}
 	}
+}
+
+/**
+ * Removes and returns the binding with the longest history that is a strict prefix of the current
+ * transcript, for the same cwd and context.
+ */
+function claimConversation(
+	active: ActiveProcess,
+	cwd: string,
+	conversation: GeminiAcpConversation,
+): ConversationBinding | undefined {
+	let best: ConversationBinding | undefined;
+	for (const binding of active.conversations) {
+		if (binding.cwd !== cwd || binding.contextKey !== conversation.contextKey) continue;
+		if (!isStrictPrefix(binding.seen, conversation.transcript)) continue;
+		if (!best || binding.seen.length > best.seen.length) best = binding;
+	}
+	if (best) active.conversations.splice(active.conversations.indexOf(best), 1);
+	return best;
+}
+
+function isStrictPrefix(prefix: readonly string[], items: readonly string[]): boolean {
+	return prefix.length < items.length && prefix.every((item, index) => items[index] === item);
 }
 
 interface MergedAbortSignal {

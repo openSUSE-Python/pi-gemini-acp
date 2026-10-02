@@ -63,3 +63,25 @@ function contentText(content: unknown): string {
 		.map((block) => block.text)
 		.join("\n");
 }
+
+/** The text of one conversation message, without images, thinking or tool calls. */
+export function messageText(message: ConversationMessage): string {
+	const content: unknown = message.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter(
+			(block): block is { type: "text"; text: string } =>
+				(block as { type?: unknown } | null)?.type === "text" &&
+				typeof (block as { text?: unknown }).text === "string",
+		)
+		.map((block) => block.text)
+		.join("");
+}
+
+/** Flattens one conversation message into a text fragment for the ACP prompt. */
+export function messageToText(message: ConversationMessage): string {
+	if (message.role === "user") return `User: ${messageText(message)}`;
+	if (message.role === "assistant") return `Assistant: ${messageText(message)}`;
+	return `Tool (${message.toolName}): ${messageText(message)}`;
+}
