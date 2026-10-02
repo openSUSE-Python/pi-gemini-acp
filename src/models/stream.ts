@@ -29,6 +29,7 @@ import type {
 } from "../types.ts";
 import { createActivityRenderer } from "./activity.ts";
 import { buildConversation } from "./conversation.ts";
+import { fitHistory, maxHistoryChars } from "./history-budget.ts";
 import { AssistantMessageBuilder } from "./message-builder.ts";
 import { createPreambleBuilder, type PiToolsSource } from "./preamble.ts";
 import { conversationMessages, currentSystemPrompt, messageToText } from "./transcript.ts";
@@ -47,8 +48,9 @@ function buildAcpPromptRequest(
 	context: Context,
 	modelId: string,
 	preamble: string | undefined,
-	maxHistoryMessages: number | undefined,
+	chatConfig: Pick<GeminiAcpChatSettings, "maxHistoryMessages" | "maxHistoryChars">,
 ): { parts: GeminiAcpPromptPart[]; conversation: GeminiAcpConversation } {
+	const { maxHistoryMessages } = chatConfig;
 	const parts: GeminiAcpPromptPart[] = [];
 	// An empty preamble (every section disabled) falls back to Pi's own system prompt.
 	const systemPrompt =
@@ -59,9 +61,11 @@ function buildAcpPromptRequest(
 		maxHistoryMessages !== undefined && maxHistoryMessages >= 0
 			? conversation.slice(-Math.max(1, Math.floor(maxHistoryMessages)))
 			: conversation;
-	for (const msg of messages) {
-		parts.push({ type: "text", text: messageToText(msg) });
-	}
+	const history = fitHistory(
+		messages.map((message) => ({ role: message.role, text: messageToText(message) })),
+		maxHistoryChars(chatConfig.maxHistoryChars),
+	);
+	for (const text of history) parts.push({ type: "text", text });
 	return {
 		parts,
 		conversation: buildConversation(conversation, `${modelId}\0${systemPrompt}`),
@@ -201,7 +205,7 @@ export function createGeminiAcpStreamSimple(
 				});
 
 				const built = {
-					...buildAcpPromptRequest(context, model.id, preamble, chatConfig.maxHistoryMessages),
+					...buildAcpPromptRequest(context, model.id, preamble, chatConfig),
 					cwd: resolveCwd(options),
 				};
 				// Extensions may inspect or replace the request, as with built-in providers.

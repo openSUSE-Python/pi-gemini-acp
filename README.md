@@ -302,6 +302,8 @@ Set any flag to `false` in `~/.pi/gemini-acp/config/settings.json` to suppress t
 
 `chat.maxHistoryMessages` limits the number of messages sent to a fresh Gemini session, including the current request. The default is unlimited. A value of `0` sends only the latest message. This is a message-count limit, not a token limit; one large tool result can still dominate the prompt. A continued session already holds the earlier messages, so only new messages are sent and this limit does not apply.
 
+`chat.maxHistoryChars` is a character budget for the same fresh-session history (default `200000`, about 50k tokens; `0` disables it). When the history is larger, tool results before the latest request are shortened to their beginning and end first, then the oldest messages are dropped with a note saying how many were left out. The latest message is always sent in full.
+
 ## Model adapter for pi-scraper
 
 If [`pi-scraper`](https://github.com/brandonkramer/pi-scraper) is also installed, its `web_summarize` routes through Gemini automatically (adapter id `gemini-acp`, `summarize` capability, priority `50`, sharing the warm `gemini_ask` ACP client). Pin explicitly with `web_summarize({ url, provider: "gemini-acp" })`, opt out via `PI_GEMINI_ACP_OFFER_MODEL_ADAPTER=0`, and verify with `gemini_status` (`modelAdapter.offered: true`).
