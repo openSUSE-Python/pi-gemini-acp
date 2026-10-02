@@ -91,6 +91,12 @@ export const geminiConfigSchema = Type.Object({
 			},
 		),
 	),
+	permissionScope: Type.Optional(
+		Type.Union([Type.Literal("chat"), Type.Literal("tools")], {
+			description:
+				"Policy for action=permissions: chat (Gemini selected as Pi's model; allows everything by default, like Pi) or tools (the gemini_* tools; restrictive by default). Defaults to tools when a capability is given; omit both to show both policies.",
+		}),
+	),
 	capability: Type.Optional(
 		Type.Union(
 			[
@@ -112,7 +118,8 @@ export const geminiConfigSchema = Type.Object({
 	),
 	confirmRisk: Type.Optional(
 		Type.Boolean({
-			description: "Must be true when enabling filesystemWrite, terminal or webFetch permissions.",
+			description:
+				"Must be true when enabling filesystemWrite, terminal or webFetch for the tools policy.",
 		}),
 	),
 	reason: Type.Optional(
@@ -208,6 +215,7 @@ export async function runGeminiConfig(
 	if (params.action === "permissions") {
 		return await runGeminiConfigPermissions(
 			{
+				scope: params.permissionScope,
 				capability: params.capability,
 				enabled: params.enabled,
 				confirmRisk: params.confirmRisk,
@@ -230,7 +238,12 @@ export async function runGeminiConfigCommand(
 	if (params.action === "search" && !params.searchAction && hasInteractiveUi(ctx)) {
 		return await showGeminiConfigSearchPicker(ctx, options);
 	}
-	if (params.action === "permissions" && !params.capability && hasInteractiveUi(ctx)) {
+	if (
+		params.action === "permissions" &&
+		!params.capability &&
+		!params.permissionScope &&
+		hasInteractiveUi(ctx)
+	) {
 		return await showGeminiConfigPermissionsPicker(ctx, options);
 	}
 	if (params.action === "cache" && hasInteractiveUi(ctx)) {
@@ -335,8 +348,11 @@ function isChatFlag(value: string): value is NonNullable<Params["chatFlag"]> {
 	return value === "appendSystemPrompt" || value === "appendAgents" || value === "appendTools";
 }
 
-function parsePermissionsArgs(parts: string[]): Params {
-	if (parts.length === 0) return { action: "permissions" };
+function parsePermissionsArgs(allParts: string[]): Params {
+	const permissionScope =
+		allParts[0] === "chat" || allParts[0] === "tools" ? allParts[0] : undefined;
+	const parts = permissionScope ? allParts.slice(1) : allParts;
+	if (parts.length === 0) return { action: "permissions", permissionScope };
 	const [rawCapability, ...rest] = parts;
 	if (!isPermissionCapability(rawCapability)) {
 		throw new Error(
@@ -364,6 +380,7 @@ function parsePermissionsArgs(parts: string[]): Params {
 	}
 	return {
 		action: "permissions",
+		permissionScope,
 		capability: rawCapability,
 		enabled,
 		confirmRisk,
@@ -481,14 +498,15 @@ function commandStatusText(
 		`- file analysis: ${boolLabel(capabilities.fileAnalysisAvailable, "available", "not confirmed")} (ACP resource-link transport; requires filesystem-read permission)`,
 		`- image input: ${boolLabel(capabilities.imageInput.available, "available", "not confirmed")} (transport: ${capabilities.imageInput.transport}; requires filesystem-read permission)`,
 		`- model: ${capabilities.model.message}`,
-		`- permission policy: ${capabilities.permissionPolicy.description}`,
+		`- chat permission policy: ${capabilities.chatPermissionPolicy.description}${chatOriginLabel(capabilities.chatPermissionPolicy.origin)}`,
+		`- gemini_* tools permission policy: ${capabilities.permissionPolicy.description}`,
 		"",
 		"ACP client services advertised to Gemini:",
 		`- file reads: ${enabledDisabled(clientCapabilities.fs.readTextFile)} (file-analysis sessions only, for their allowlisted files)`,
 		`- file writes: ${enabledDisabled(clientCapabilities.fs.writeTextFile)} (Gemini edits files with its own tools)`,
 		`- terminal: ${enabledDisabled(clientCapabilities.terminal)} (Gemini runs commands with its own tools)`,
 		`- auth terminal: ${enabledDisabled(clientCapabilities.auth.terminal)}`,
-		"Gemini's own edits and commands are allowed or denied by the permission policy above when Gemini asks for permission. In Gemini CLI's auto-edit or yolo approval modes it does not ask.",
+		"Gemini's own edits, commands and web fetches are allowed or denied by the permission policies above when Gemini asks for permission. In Gemini CLI's auto-edit or yolo approval modes it does not ask.",
 		"",
 		"Model adapter:",
 		`- offered: ${yesNo(adapter.offered)}`,
@@ -502,6 +520,12 @@ function commandStatusText(
 	}
 	lines.push("", "Remediation:", ...status.remediation.map((item) => `- ${item}`));
 	return lines.join("\n");
+}
+
+function chatOriginLabel(origin: "chat" | "provider" | "default"): string {
+	if (origin === "default") return " (default, as in Pi)";
+	if (origin === "provider") return " (kept from the policy saved before the split)";
+	return "";
 }
 
 function buildChatSummary(

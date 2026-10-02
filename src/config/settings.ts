@@ -132,7 +132,10 @@ export async function saveChatSettings(
 	return config;
 }
 
-/** Removes the chat-preamble block from providers["gemini-acp"]. */
+/**
+ * Resets the chat-preamble settings in providers["gemini-acp"].chat. The chat permission policy is
+ * kept: it is managed by /gemini-config permissions, not by the preamble reset.
+ */
 export async function clearChatSettings(
 	options: StorageOptions = {},
 	current?: GeminiAcpConfig,
@@ -141,12 +144,15 @@ export async function clearChatSettings(
 	await ensureDir(paths.config);
 	const base = current ?? (await loadConfig(options));
 	const provider = base.providers?.["gemini-acp"] ?? {};
-	const { chat: _, ...rest } = provider;
+	const { chat, ...rest } = provider;
+	const permissionPolicy = chat?.permissionPolicy;
 	const config: GeminiAcpConfig = {
 		...base,
 		providers: {
 			...base.providers,
-			"gemini-acp": rest as GeminiAcpProviderSettings,
+			"gemini-acp": (permissionPolicy
+				? { ...rest, chat: { permissionPolicy } }
+				: rest) as GeminiAcpProviderSettings,
 		},
 	};
 	await writeFile(path.join(paths.config, CONFIG_FILE), JSON.stringify(config, null, 2), {
