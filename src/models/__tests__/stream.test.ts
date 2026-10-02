@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GeminiAcpClient, GeminiAcpCommandSettings } from "../../acp/client.ts";
 import type { GeminiAcpConfig } from "../../types.ts";
-import { createGeminiAcpStreamSimple } from "../stream.ts";
+import { createGeminiAcpStreamSimple, promptSettingsForModel } from "../stream.ts";
 
 const fakePi = {};
 const fakeChatConfig = {};
@@ -140,7 +140,7 @@ describe("createGeminiAcpStreamSimple", () => {
 			{
 				type: "thinking",
 				thinking:
-					"Checking the tree.\n▸ Shell: git status --short\n✗ Denied by the Gemini ACP permission policy, which does not allow file writes (a.txt). Use /gemini-config permissions to change it.\n",
+					"Checking the tree.\n▸ Shell: git status --short\n✗ Denied by the Gemini ACP permission policy, which does not allow file writes (a.txt). Use /gemini-config permissions chat to change it.\n",
 			},
 			{ type: "text", text: "Clean." },
 		]);
@@ -486,3 +486,21 @@ function makeTestHistoryMessages(count: number): Context["messages"] {
 				} as unknown as Context["messages"][0]),
 	);
 }
+
+describe("promptSettingsForModel", () => {
+	it("gives chat turns the chat permission policy", () => {
+		expect(promptSettingsForModel(undefined, "gemini-auto").permissionPolicy).toMatchObject({
+			filesystemWrite: true,
+			terminal: true,
+			webFetch: true,
+		});
+		const tools = { filesystemRead: true };
+		const chat = { filesystemRead: true, terminal: true };
+		expect(
+			promptSettingsForModel(
+				{ command: "gemini", permissionPolicy: tools, chat: { permissionPolicy: chat } },
+				"gemini-auto",
+			).permissionPolicy,
+		).toBe(chat);
+	});
+});

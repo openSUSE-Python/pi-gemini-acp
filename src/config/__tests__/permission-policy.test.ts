@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { GeminiAcpPermissionPolicy } from "../../types.ts";
 import {
+	CHAT_DEFAULT_PERMISSION_POLICY,
+	chatPermissionPolicy,
 	describePermissionPolicy,
 	migrateLegacyPermissionPolicy,
 	permissionPolicyCapabilities,
@@ -24,6 +26,23 @@ describe("Gemini ACP permission policy", () => {
 			terminal: false,
 		});
 		expect(describePermissionPolicy()).toContain("no filesystem, terminal or web fetch access");
+	});
+
+	it("allows everything in chat by default but keeps saved choices", () => {
+		expect(chatPermissionPolicy(undefined)).toEqual({
+			policy: CHAT_DEFAULT_PERMISSION_POLICY,
+			origin: "default",
+		});
+		expect(resolvePermissionPolicy(CHAT_DEFAULT_PERMISSION_POLICY).mode).toBe("full");
+		const saved = { filesystemRead: true };
+		expect(chatPermissionPolicy({ permissionPolicy: saved })).toEqual({
+			policy: saved,
+			origin: "provider",
+		});
+		const chat = { terminal: true };
+		expect(
+			chatPermissionPolicy({ permissionPolicy: saved, chat: { permissionPolicy: chat } }),
+		).toEqual({ policy: chat, origin: "chat" });
 	});
 
 	it("resolves webFetch as its own capability", () => {

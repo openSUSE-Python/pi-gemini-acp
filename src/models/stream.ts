@@ -22,6 +22,7 @@ import type {
 	GeminiAcpPromptUsage,
 } from "../acp/client.ts";
 import { withGitIdentityForCwd } from "../acp/settings.ts";
+import { chatPermissionPolicy } from "../config/permission-policy.ts";
 import { estimateCostChars, estimateCostTokens } from "../tools/cost-estimate.ts";
 import type {
 	GeminiAcpChatSettings,
@@ -164,14 +165,15 @@ function resolveCwd(options: unknown): string {
 }
 
 /**
- * Provider settings for a chat turn on the Pi-selected `modelId`. The prompt prewarm must use the
- * same function: the cached ACP client is keyed by the resulting command line.
+ * Provider settings for a chat turn on the Pi-selected `modelId`, with the chat permission policy.
+ * The prompt prewarm must use the same function: the cached ACP client is keyed by the resulting
+ * command line and policy.
  */
 export function promptSettingsForModel(
 	settings: GeminiAcpProviderSettings | undefined,
 	modelId: string,
 ): GeminiAcpProviderSettings {
-	return { ...settings, model: modelId };
+	return { ...settings, model: modelId, permissionPolicy: chatPermissionPolicy(settings).policy };
 }
 
 /** Factory that returns a Pi-compatible streamSimple function backed by our ACP client. */

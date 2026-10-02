@@ -159,6 +159,11 @@ export interface GeminiAcpChatSettings {
 	 * shortened, then the oldest messages dropped. Undefined uses 200,000; 0 or less disables it.
 	 */
 	maxHistoryChars?: number | undefined;
+	/**
+	 * Permission policy for chat sessions (Gemini selected as Pi's model). When unset, a saved
+	 * provider-level policy applies; without one, everything is allowed, as in Pi itself.
+	 */
+	permissionPolicy?: GeminiAcpPermissionPolicy;
 }
 
 /** Failover configuration for multi-account ACP rotation. */

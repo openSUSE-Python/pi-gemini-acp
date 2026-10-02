@@ -1,4 +1,8 @@
-import type { GeminiAcpPermissionPolicy, StructuredError } from "../types.ts";
+import type {
+	GeminiAcpPermissionPolicy,
+	GeminiAcpProviderSettings,
+	StructuredError,
+} from "../types.ts";
 
 export const GEMINI_ACP_PERMISSION_MODES = [
 	"restrictive",
@@ -9,7 +13,40 @@ export const GEMINI_ACP_PERMISSION_MODES = [
 
 export type GeminiAcpPermissionMode = (typeof GEMINI_ACP_PERMISSION_MODES)[number];
 
-export type PermissionPolicyDisplayMode = GeminiAcpPermissionMode | "custom";
+export type PermissionPolicyDisplayMode = GeminiAcpPermissionMode | "full" | "custom";
+
+/**
+ * Which sessions a policy governs. "chat": Gemini selected as Pi's model, the user's own coding
+ * agent. "tools": the gemini_* tools another model calls, typically on untrusted web pages or
+ * files, so a prompt-injection path that needs no writes, commands or fetches.
+ */
+export type PermissionScope = "chat" | "tools";
+
+/** Chat default when nothing is saved: everything allowed, like Pi's own tools. */
+export const CHAT_DEFAULT_PERMISSION_POLICY: GeminiAcpPermissionPolicy = {
+	filesystemRead: true,
+	filesystemWrite: true,
+	terminal: true,
+	webFetch: true,
+};
+
+/** Where the effective chat policy comes from. */
+export type ChatPolicyOrigin = "chat" | "provider" | "default";
+
+/**
+ * The policy for chat sessions: `chat.permissionPolicy`, else a policy saved before chat and tools
+ * had separate policies (the user's earlier choice is kept), else the allow-all chat default.
+ */
+export function chatPermissionPolicy(settings: GeminiAcpProviderSettings | undefined): {
+	policy: GeminiAcpPermissionPolicy;
+	origin: ChatPolicyOrigin;
+} {
+	if (settings?.chat?.permissionPolicy) {
+		return { policy: settings.chat.permissionPolicy, origin: "chat" };
+	}
+	if (settings?.permissionPolicy) return { policy: settings.permissionPolicy, origin: "provider" };
+	return { policy: CHAT_DEFAULT_PERMISSION_POLICY, origin: "default" };
+}
 
 export type PermissionCapability = "filesystemRead" | "filesystemWrite" | "terminal" | "webFetch";
 
@@ -78,7 +115,12 @@ export function resolvePermissionPolicy(
 	const terminal = migrated.terminal === true;
 	const webFetch = migrated.webFetch === true;
 	return {
-		mode: webFetch ? "custom" : modeForCapabilities(filesystemRead, filesystemWrite, terminal),
+		mode:
+			filesystemRead && filesystemWrite && terminal && webFetch
+				? "full"
+				: webFetch
+					? "custom"
+					: modeForCapabilities(filesystemRead, filesystemWrite, terminal),
 		filesystemRead,
 		filesystemWrite,
 		terminal,

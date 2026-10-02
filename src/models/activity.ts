@@ -66,7 +66,7 @@ function permissionDeniedLine(
 	const title = shortTitle(activity.title);
 	const what = title ? ` (${title})` : "";
 	if (activity.capability) {
-		return `✗ Denied by the Gemini ACP permission policy, which does not allow ${CAPABILITY_LABELS[activity.capability]}${what}. Use /gemini-config permissions to change it.`;
+		return `✗ Denied by the Gemini ACP permission policy, which does not allow ${CAPABILITY_LABELS[activity.capability]}${what}. Use /gemini-config permissions chat to change it.`;
 	}
 	return `✗ Denied: Gemini asked to run a ${activity.kind ?? "unknown"} tool${what}, which the Gemini ACP permission policy does not cover.`;
 }

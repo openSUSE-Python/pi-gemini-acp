@@ -97,7 +97,9 @@ With authenticated, search-capable `gemini --acp`, Gemini-backed tools work from
 ```bash
 /gemini-config status
 /gemini-config command gemini --acp
-/gemini-config permissions filesystemRead
+/gemini-config permissions
+/gemini-config permissions tools filesystemRead on
+/gemini-config permissions chat terminal off
 /gemini-config trust
 /gemini-config cache status
 /gemini-config cache clear --tool gemini_search
@@ -117,9 +119,12 @@ The interactive picker includes a Search tool section. Search is enabled by defa
 ### Safety notes
 
 - Use Gemini CLI local auth; do not pass API keys to `/gemini-config command`.
-- `permissions` controls the answers to Gemini's ACP permission requests, not a filesystem or shell sandbox. Gemini CLI approval settings can allow operations without asking this extension: when a chat session runs in Gemini's `autoEdit` or `yolo` approval mode, the chat shows a warning that the policy is not applied.
+- `permissions` controls the answers to Gemini's ACP permission requests, not a filesystem or shell sandbox. There are two policies:
+  - **chat** (Gemini selected as Pi's model): allows file reads, file writes, terminal and web fetch by default, like Pi itself, which does not ask before tool calls. Change it with `/gemini-config permissions chat <capability> on|off`; no confirmation is needed. A policy saved before the two were separated keeps applying to chat until you change the chat policy.
+  - **tools** (`gemini_search`, `gemini_research`, `gemini_ask`, `gemini_analyze`): restrictive by default. These tools are called by another model, usually on untrusted web pages or files, which can contain prompt injection. Filesystem write, terminal and web fetch for them require `confirmRisk=true`. A capability given without a scope changes this policy.
+- The capabilities are `filesystemRead`, `filesystemWrite`, `terminal`, and `webFetch` (Gemini's `web_fetch` tool, which retrieves URLs the model chooses).
+- Gemini CLI approval settings can allow operations without asking this extension: when a chat session runs in Gemini's `autoEdit` or `yolo` approval mode, the chat shows a warning that the policy is not applied. For real isolation, run Pi in a container or VM (see Pi's security guide).
 - The client does not advertise filesystem-write or terminal services. Gemini executes writes and commands locally using its own tools; this avoids routing writes to an unimplemented `fs/write_text_file` handler.
-- The policy has four capabilities: `filesystemRead`, `filesystemWrite`, `terminal`, and `webFetch` (Gemini's `web_fetch` tool, which retrieves URLs the model chooses). Filesystem write, terminal and web fetch require `confirmRisk=true`.
 - Use `/gemini-config trust` only when Gemini CLI requires workspace trust.
 
 ### Environment overrides
