@@ -5,7 +5,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { JsonRpcTimeoutError } from "../jsonrpc-stdio.ts";
-import { AcpProcessSession, GeminiAcpIdleTimeoutError, promptIdleTimeoutMs } from "../session.ts";
+import {
+	AcpProcessSession,
+	GeminiAcpIdleTimeoutError,
+	GeminiAcpToolTimeoutError,
+	promptIdleTimeoutMs,
+	toolTimeoutMs,
+} from "../session.ts";
 import { acpTimeoutMs, traceAcp } from "../trace.ts";
 
 // A local protocol peer, not Gemini: no credentials, network requests, or project tools.
@@ -266,6 +272,41 @@ describe("ACP session protocol and diagnostics", () => {
 		const error = await active.prompt(id, "tool-stall").catch((caught: unknown) => caught);
 		expect(error).toBeInstanceOf(JsonRpcTimeoutError);
 		expect(error).not.toBeInstanceOf(GeminiAcpIdleTimeoutError);
+	});
+
+	it("cancels a turn whose Gemini tool call runs past the per-tool limit", async () => {
+		const file = path.join(dir, "trace.jsonl");
+		vi.stubEnv("PI_GEMINI_ACP_TRACE_FILE", file);
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS", "20");
+		vi.stubEnv("PI_GEMINI_ACP_TOOL_TIMEOUT_MS", "40");
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", "2000");
+		const { session: active, id } = await start();
+		await expect(active.prompt(id, "tool-stall")).rejects.toBeInstanceOf(GeminiAcpToolTimeoutError);
+		const trace = await readFile(file, "utf8");
+		expect(trace).toContain('"event":"prompt.tool_timeout"');
+		expect(trace).toMatch(/"event":"prompt.tool_timeout".*"kind":"execute"/u);
+	});
+
+	it("applies the per-tool limit to an approved permission request", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_TOOL_TIMEOUT_MS", "40");
+		vi.stubEnv("PI_GEMINI_ACP_PROMPT_TIMEOUT_MS", "2000");
+		const { session: active, id } = await start();
+		await expect(active.prompt(id, "approved-tool-stall")).rejects.toBeInstanceOf(
+			GeminiAcpToolTimeoutError,
+		);
+	});
+
+	it("does not apply the per-tool limit to tool calls that finish in time", async () => {
+		vi.stubEnv("PI_GEMINI_ACP_TOOL_TIMEOUT_MS", "200");
+		const { session: active, id } = await start();
+		await expect(active.prompt(id, "approved-tool")).resolves.toBe("");
+	});
+
+	it("disables the per-tool limit with 0 and rejects invalid values", () => {
+		vi.stubEnv("PI_GEMINI_ACP_TOOL_TIMEOUT_MS", "0");
+		expect(toolTimeoutMs()).toBe(0);
+		vi.stubEnv("PI_GEMINI_ACP_TOOL_TIMEOUT_MS", "-5");
+		expect(toolTimeoutMs()).toBe(600_000);
 	});
 
 	it("treats an approved permission request as the start of its tool call", async () => {

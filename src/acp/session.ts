@@ -49,6 +49,20 @@ const PROMPT_IDLE_TIMEOUT_ENV = "PI_GEMINI_ACP_PROMPT_IDLE_TIMEOUT_MS";
  */
 export class GeminiAcpIdleTimeoutError extends JsonRpcTimeoutError {}
 
+/**
+ * A single Gemini tool call may run this long before the turn is cancelled. The idle limit ignores
+ * running tools, so without this a hung tool (a web search stuck in server-side retries, a command
+ * waiting for input) holds the turn until the total deadline.
+ */
+export const DEFAULT_TOOL_TIMEOUT_MS = 600_000;
+const TOOL_TIMEOUT_ENV = "PI_GEMINI_ACP_TOOL_TIMEOUT_MS";
+
+/**
+ * A prompt was cancelled because one of Gemini's tool calls ran longer than the per-tool limit. ACP
+ * cannot cancel a single tool call, so the whole turn ends; it is never replayed.
+ */
+export class GeminiAcpToolTimeoutError extends JsonRpcTimeoutError {}
+
 /** Controls cancellation behavior and observers for one in-flight ACP prompt turn. */
 export interface GeminiAcpPromptOptions extends GeminiAcpPromptObservers {
 	signal?: AbortSignal;
@@ -63,6 +77,8 @@ interface PromptState {
 	onActivity?: GeminiAcpPromptObservers["onActivity"];
 	/** Records progress for the stall detector. */
 	touch?: () => void;
+	/** Starts or stops per-tool limits after `runningTools` changed. */
+	syncTools?: () => void;
 	/** Gemini tool calls that started and have not completed or failed yet. */
 	runningTools: Set<string>;
 	/** Metadata-only counters for the `prompt.end` trace record. */
@@ -233,10 +249,18 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				longestToolMs: 0,
 			},
 		};
-		const idle = new PromptIdleWatchdog(promptIdleTimeoutMs(), state.runningTools, () =>
-			traceAcp("prompt.idle_timeout", { connectionId: this.rpc.connectionId }),
+		const idle = new PromptWatchdog(
+			promptIdleTimeoutMs(),
+			toolTimeoutMs(),
+			state.runningTools,
+			(reason, kind) =>
+				traceAcp(reason === "idle" ? "prompt.idle_timeout" : "prompt.tool_timeout", {
+					connectionId: this.rpc.connectionId,
+					kind,
+				}),
 		);
 		state.touch = () => idle.touch();
+		state.syncTools = () => idle.syncTools(state.stats.tools);
 		const signal = options.signal ? AbortSignal.any([options.signal, idle.signal]) : idle.signal;
 		this.promptStates.set(sessionId, state);
 		this.reportApprovalMode(sessionId, state);
@@ -373,6 +397,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 				const started = { ...toolCall, toolCallId, status: "in_progress" };
 				trackRunningTool(state.runningTools, started);
 				this.trackToolTiming(state.stats, started);
+				state.syncTools?.();
 				this.emitActivity(state, {
 					type: "tool",
 					toolCallId,
@@ -480,6 +505,7 @@ export class AcpProcessSession implements GeminiAcpProcessSession {
 			case "tool_call_update":
 				trackRunningTool(state.runningTools, update);
 				this.trackToolTiming(state.stats, update);
+				state.syncTools?.();
 				this.emitActivity(state, {
 					type: "tool",
 					toolCallId: coerceString(update.toolCallId),
@@ -606,18 +632,38 @@ export function promptIdleTimeoutMs(): number {
 	return acpTimeoutMs(PROMPT_IDLE_TIMEOUT_ENV, DEFAULT_PROMPT_IDLE_TIMEOUT_MS);
 }
 
-/** Cancels a prompt that stops sending progress while none of Gemini's tools is running. */
-class PromptIdleWatchdog {
+/** Per-tool limit in ms, or 0 when disabled with `PI_GEMINI_ACP_TOOL_TIMEOUT_MS=0`. */
+export function toolTimeoutMs(): number {
+	if (process.env[TOOL_TIMEOUT_ENV]?.trim() === "0") return 0;
+	return acpTimeoutMs(TOOL_TIMEOUT_ENV, DEFAULT_TOOL_TIMEOUT_MS);
+}
+
+type WatchdogReason = "idle" | "tool";
+
+/**
+ * Cancels a prompt that stops sending progress while none of Gemini's tools is running, or whose
+ * single tool call runs longer than the per-tool limit.
+ */
+class PromptWatchdog {
 	readonly signal: AbortSignal;
 	fired = false;
+	private reason: WatchdogReason = "idle";
 	private readonly controller = new AbortController();
-	private readonly timeoutMs: number;
+	private readonly idleMs: number;
+	private readonly toolMs: number;
 	private readonly runningTools: ReadonlySet<string>;
-	private readonly onFire: () => void;
+	private readonly onFire: (reason: WatchdogReason, kind?: string) => void;
 	private timer?: ReturnType<typeof setTimeout>;
+	private readonly toolTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-	constructor(timeoutMs: number, runningTools: ReadonlySet<string>, onFire: () => void) {
-		this.timeoutMs = timeoutMs;
+	constructor(
+		idleMs: number,
+		toolMs: number,
+		runningTools: ReadonlySet<string>,
+		onFire: (reason: WatchdogReason, kind?: string) => void,
+	) {
+		this.idleMs = idleMs;
+		this.toolMs = toolMs;
 		this.runningTools = runningTools;
 		this.onFire = onFire;
 		this.signal = this.controller.signal;
@@ -625,32 +671,65 @@ class PromptIdleWatchdog {
 	}
 
 	touch(): void {
-		if (this.timeoutMs <= 0 || this.fired) return;
+		if (this.idleMs <= 0 || this.fired) return;
 		if (this.timer) clearTimeout(this.timer);
 		this.timer = setTimeout(() => {
-			// A running tool (build, test suite) may legitimately stay silent; the total deadline
-			// still bounds it.
+			// A running tool (build, test suite) may legitimately stay silent; the per-tool limit
+			// and the total deadline still bound it.
 			if (this.runningTools.size > 0) {
 				this.touch();
 				return;
 			}
-			this.fired = true;
-			this.onFire();
-			this.controller.abort();
-		}, this.timeoutMs);
+			this.fire("idle");
+		}, this.idleMs);
 		this.timer.unref();
 	}
 
-	error(): GeminiAcpIdleTimeoutError {
-		const minutes = Math.round((this.timeoutMs / 60_000) * 10) / 10;
+	/** Arms a timer for each newly running tool and clears the timers of finished ones. */
+	syncTools(tools: ReadonlyMap<string, { kind?: string }>): void {
+		if (this.toolMs <= 0 || this.fired) return;
+		for (const [id, timer] of this.toolTimers) {
+			if (!this.runningTools.has(id)) {
+				clearTimeout(timer);
+				this.toolTimers.delete(id);
+			}
+		}
+		for (const id of this.runningTools) {
+			if (this.toolTimers.has(id)) continue;
+			const timer = setTimeout(() => this.fire("tool", tools.get(id)?.kind), this.toolMs);
+			timer.unref();
+			this.toolTimers.set(id, timer);
+		}
+	}
+
+	private fire(reason: WatchdogReason, kind?: string): void {
+		if (this.fired) return;
+		this.fired = true;
+		this.reason = reason;
+		this.onFire(reason, kind);
+		this.controller.abort();
+	}
+
+	error(): JsonRpcTimeoutError {
+		if (this.reason === "tool") {
+			return new GeminiAcpToolTimeoutError(
+				`A Gemini tool call ran for more than ${minutes(this.toolMs)} min, so the turn was cancelled. Check the working tree before retrying. Set ${TOOL_TIMEOUT_ENV} to change this limit (0 disables it).`,
+			);
+		}
 		return new GeminiAcpIdleTimeoutError(
-			`Gemini ACP sent no progress for ${minutes} min while no Gemini tool was running, so the turn was cancelled. Check the working tree before retrying. Set ${PROMPT_IDLE_TIMEOUT_ENV} to change this limit (0 disables it).`,
+			`Gemini ACP sent no progress for ${minutes(this.idleMs)} min while no Gemini tool was running, so the turn was cancelled. Check the working tree before retrying. Set ${PROMPT_IDLE_TIMEOUT_ENV} to change this limit (0 disables it).`,
 		);
 	}
 
 	dispose(): void {
 		if (this.timer) clearTimeout(this.timer);
+		for (const timer of this.toolTimers.values()) clearTimeout(timer);
+		this.toolTimers.clear();
 	}
+}
+
+function minutes(ms: number): number {
+	return Math.round((ms / 60_000) * 10) / 10;
 }
 
 function trackRunningTool(runningTools: Set<string>, update: Record<string, unknown>): void {
