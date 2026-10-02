@@ -72,7 +72,12 @@ rl.on('line', line => {
         sessionUpdate: 'tool_call', toolCallId: 'call-1', status: 'in_progress', title: 'SECRET_COMMAND', kind: 'edit'
       } } });
       send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
-        sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed'
+        sessionUpdate: 'tool_call_update', toolCallId: 'call-1', status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'SECRET_OUTPUT' } },
+          { type: 'diff', path: 'SECRET_FILE', oldText: 'a', newText: 'b' },
+          { type: 'terminal', terminalId: 'SECRET_TERMINAL' }
+        ]
       } } });
       send({ method: 'session/update', params: { sessionId: 'private-session-id', update: {
         sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'SECRET_ANSWER' }
@@ -163,7 +168,7 @@ describe("ACP session protocol and diagnostics", () => {
 		expect(new Set(records.map((record) => record.connectionId)).size).toBe(1);
 	});
 
-	it("reports thoughts, tool calls, permission decisions and token usage to observers", async () => {
+	it("reports thoughts, tool calls with their output, permission decisions and token usage to observers", async () => {
 		const { session: active, id } = await start();
 		const activity: unknown[] = [];
 		const outcomes: unknown[] = [];
@@ -186,6 +191,7 @@ describe("ACP session protocol and diagnostics", () => {
 				kind: "edit",
 				status: "in_progress",
 				title: "SECRET_COMMAND",
+				output: undefined,
 			},
 			{
 				type: "tool",
@@ -193,6 +199,7 @@ describe("ACP session protocol and diagnostics", () => {
 				kind: undefined,
 				status: "completed",
 				title: undefined,
+				output: "SECRET_OUTPUT\nChanged SECRET_FILE",
 			},
 		]);
 		expect(outcomes).toEqual([
