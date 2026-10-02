@@ -296,7 +296,7 @@ When Gemini ACP is selected as the active Pi model, every prompt is prefixed wit
 
 - `appendSystemPrompt` (default `true`) — includes the Pi identity header (`You are running inside Pi...`) and the upstream system prompt.
 - `appendAgents` (default `true`) — includes the `AGENTS.md` from the working directory (capped at ~32 KB).
-- `appendTools` (default `true`) — lists active Pi tools.
+- `appendTools` (default `true`) — lists active Pi tools that Pi's instructions may name, and tells Gemini it cannot call them in the chat session and should use its own tools instead.
 
 Set any flag to `false` in `~/.pi/gemini-acp/config/settings.json` to suppress that section.
 
